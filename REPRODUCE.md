@@ -47,7 +47,7 @@ conda install -c conda-forge "gcc_linux-64=10.*" "gxx_linux-64=10.*" -y
 conda install -c conda-forge libxcrypt -y
 pip install torch==1.9.1+cu111 torchvision==0.10.1+cu111 torchaudio==0.9.1 \
     -f https://download.pytorch.org/whl/torch_stable.html
-pip install ninja plyfile black flake8 plotly pytest pyquaternion shapely tqdm tensorboard
+pip install ninja plyfile black flake8 plotly pytest pyquaternion shapely tqdm tensorboard geffnet
 pip install "numpy==1.19.5" "matplotlib==3.5.3" "scikit-image==0.19.3" "networkx==2.2" "pandas==1.4.4" "yapf==0.31.0"
 pip install "numba==0.56.4"
 pip install mmcv-full==1.4.0 \
@@ -60,6 +60,7 @@ cd mmdetection3d && git checkout -f v0.17.1 && python setup.py develop --no-deps
 sed -i 's/from numba.errors import NumbaPerformanceWarning/from numba.core.errors import NumbaPerformanceWarning/' \
     mmdetection3d/mmdet3d/datasets/pipelines/data_augment_utils.py
 pip install nuscenes-devkit==1.1.9
+pip install "timm==0.6.13"
 sed -i 's/self.class_names = self.class_range.keys()/self.class_names = list(self.class_range.keys())/' \
     $CONDA_PREFIX/lib/python3.8/site-packages/nuscenes/eval/detection/data_classes.py
 sed -i 's/^from setuptools import distutils$/import distutils.version/' \
@@ -114,14 +115,6 @@ curl -L -o OSZ/weights/midas_v21_small_256.pt \
 ```shell
 git clone https://github.com/isl-org/MiDaS.git OSZ/third_party/MiDaS
 ```
-
-**代码读取规则**：`OSZ/config.py::MIDAS_MODEL_PATH` 指定权重本地路径、
-`MIDAS_REPO_PATH` 指定 repo 本地路径；`DepthEstimator` 用
-`torch.hub.load(..., source='local')` 加载官方 `hubconf.py` 的 `MiDaS_small`
-入口（MiDaSNet-small，官方 `small_transform` 预处理，保证输入分布与训练
-一致；注意 `DPT_Small` 在 hubconf 中不存在），**只从本地读取、绝不联网下载**；
-repo/权重缺失时明确报错并自动回退 `MockDepthEstimator`（LiDAR densified
-深度），不影响其余流程。
 
 ---
 

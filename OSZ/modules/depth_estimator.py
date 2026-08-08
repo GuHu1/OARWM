@@ -159,7 +159,9 @@ class DepthEstimator:
 
         model = self._load()
         # `small_transform` already returns a (1, 3, 256, 256) CPU tensor.
-        input_t = self._transform({"image": image}).to(self.device)
+        # Its Compose starts with `lambda img: {"image": img / 255.0}` which
+        # expects the raw ndarray, NOT a {"image": ...} dict.
+        input_t = self._transform(image).to(self.device)
         with torch.no_grad():
             pred = model(input_t)  # (1, 1, 256, 256)
         depth = F.interpolate(
