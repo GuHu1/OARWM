@@ -47,18 +47,23 @@ conda install -c conda-forge "gcc_linux-64=10.*" "gxx_linux-64=10.*" -y
 conda install -c conda-forge libxcrypt -y
 pip install torch==1.9.1+cu111 torchvision==0.10.1+cu111 torchaudio==0.9.1 \
     -f https://download.pytorch.org/whl/torch_stable.html
-pip install ninja                  # mmcv/mmdet3d 编译加速
-pip install "numpy==1.19.5"
-pip install "matplotlib==3.5.3" "scikit-image==0.19.3"
+pip install ninja plyfile black flake8 plotly pytest
+pip install "numpy==1.19.5" "matplotlib==3.5.3" "scikit-image==0.19.3" "networkx==2.2" "pandas==1.4.4" "yapf==0.31.0"
+pip install "numba==0.56.4"
 pip install mmcv-full==1.4.0 \
     -f https://download.openmmlab.com/mmcv/dist/cu111/torch1.9/index.html
 pip install mmdet==2.14.0
 pip install mmsegmentation==0.14.1
+pip install lyft_dataset_sdk --no-deps
 git clone https://github.com/open-mmlab/mmdetection3d.git
 cd mmdetection3d && git checkout -f v0.17.1 && python setup.py develop --no-deps && cd ..
+sed -i 's/from numba.errors import NumbaPerformanceWarning/from numba.core.errors import NumbaPerformanceWarning/' \
+    mmdetection3d/mmdet3d/datasets/pipelines/data_augment_utils.py
 pip install nuscenes-devkit==1.1.9
 pip install pyquaternion shapely tqdm tensorboard
-# （scikit-image 已在上文 numpy 段统一安装，版本 0.19.3）
+sed -i 's/^from setuptools import distutils$/import distutils.version/' \
+    $CONDA_PREFIX/lib/python3.8/site-packages/torch/utils/tensorboard/__init__.py
+# （scikit-image 已在上文 numpy 段统一安装，版本 0.19.3；
 ```
 
 ### 2.2 编译环境变量自动注入

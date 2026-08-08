@@ -933,7 +933,7 @@ class v1CustomDetectionConfig:
         self.max_boxes_per_sample = max_boxes_per_sample
         self.mean_ap_weight = mean_ap_weight
 
-        self.class_names = self.class_range_y.keys()
+        self.class_names = list(self.class_range_y.keys())
 
     def __eq__(self, other):
         eq = True
