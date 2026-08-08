@@ -163,7 +163,10 @@ class DepthEstimator:
         # expects the raw ndarray, NOT a {"image": ...} dict.
         input_t = self._transform(image).to(self.device)
         with torch.no_grad():
-            pred = model(input_t)  # (1, 1, 256, 256)
+            pred = model(input_t)  # MiDaS_small returns (1, 256, 256): its
+            # forward ends with torch.squeeze(out, dim=1). Restore the channel
+            # dim so F.interpolate sees a 4D (N, C, H, W) input.
+            pred = pred.unsqueeze(1)  # (1, 1, 256, 256)
         depth = F.interpolate(
             pred,
             size=(image.shape[0], image.shape[1]),
