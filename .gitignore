@@ -11,3 +11,4 @@ tests
 .pytest_cache/
 *.tmp_*/
 OSZ/output/
+OSZ/third_party/
