@@ -54,11 +54,13 @@ OSZ 的深度估计使用 **MiDaS v2.1 Small**（`midas_v21_small_256.pt`，2021
 conda create -n resworld python=3.8 -y
 conda activate resworld
 
+# CUDA 编译工具链
 conda install -c "nvidia/label/cuda-11.3.1" --override-channels cuda-toolkit -y
-
+conda install -c conda-forge "gcc_linux-64=10.*" "gxx_linux-64=10.*" -y
 pip install torch==1.9.1+cu111 torchvision==0.10.1+cu111 torchaudio==0.9.1 \
     -f https://download.pytorch.org/whl/torch_stable.html
-pip install mmcv-full==1.4.0
+pip install mmcv-full==1.4.0 \
+    -f https://download.openmmlab.com/mmcv/dist/cu111/torch1.9/index.html
 pip install mmdet==2.14.0
 pip install mmsegmentation==0.14.1
 git clone https://github.com/open-mmlab/mmdetection3d.git
@@ -69,6 +71,9 @@ pip install pyquaternion shapely tqdm tensorboard
 
 > 编译提示：mmcv-full 1.4.0 / mmdet3d v0.17.1 的 CUDA 算子用 conda 的
 > nvcc 11.3 编译（与 cu111 wheel 同 soname 兼容，驱动 >= 465 即可）。
+> 注：conda 无 11.1/11.2 工具链（`cuda-nvcc` 最早 11.3.58；11.1/11.2 label
+> 为空），且 `cuda-11.3.0` label 不完整（缺 `cuda-nvml-dev`/`cuda-samples`，
+> 装不上），须用补丁版 `cuda-11.3.1` label（2026-07 实测 repodata 依赖闭环）。
 > 编译前建议设置 `export TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6"`（RTX 3090 = 8.6）。
 
 ### 3.2 MiDaS 模型准备
