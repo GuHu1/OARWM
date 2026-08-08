@@ -1,9 +1,6 @@
 # OARWM-Res 复现指南（Linux 服务器）
 
-> 适用对象：在服务器上复现 ResWorld 基线 + OSZ 遮挡流水线，并在此基础上实现
 > OARWM-Res（设计文档见 `OARWM_ResWorld.md`）。
-> 本文档基于仓库实际代码（`projects/`、`tools/`、`OSZ/`）与官方
-> README 整理，命令均在 Linux + CUDA 环境下验证过官方路径。
 
 ---
 
@@ -11,7 +8,6 @@
 
 ```text
 OARWM/
-├── README.md                    # ResWorld 官方基线（ICLR2026）说明
 ├── OARWM_ResWorld.md            # OARWM-Res 改进设计文档（Stage 1-6）
 ├── OSZ/                         # 高度感知遮挡阴影区流水线（设计文档 Stage 2）
 │   ├── config.py                #   BEV 网格（对齐 ResWorld grid_config，200×200 各向异性）+ 高度/眼高/深度/相机/HD-map 参数
@@ -34,21 +30,12 @@ OARWM/
 
 ---
 
-## 2. GPU 选型
-
-ResWorld 官方（README / arXiv 2026.02 论文）的训练环境是 **8×RTX 3090
-(24 GB)**，软件栈 `python 3.8 + torch 1.9.1+cu111 + CUDA 11.1`（论文配置）。
-本仓库全部流程——ResWorld 基线 / OARWM 训练与评估、OSZ 深度估计（MiDaS
-内联）、掩码批量导出——**均在这台 8×3090 上完成**
-
----
-
-## 3. 环境：单一训练环境 + 一次性 OSZ 预处理
+## 2. 环境：单一训练环境 + 一次性 OSZ 预处理
 
 OSZ 的深度估计使用 **MiDaS v2.1 Small**（`midas_v21_small_256.pt`，2021
 年模型；MiDaS权重离线下载到本地路径，代码**本地加载**。
 
-### 3.1 训练环境 resworld（唯一长期环境，官方配置）
+### 2.1 训练环境 resworld（唯一长期环境，官方配置）
 
 ```shell
 conda create -n resworld python=3.8 -y
@@ -57,16 +44,43 @@ conda activate resworld
 # CUDA 编译工具链
 conda install -c "nvidia/label/cuda-11.3.1" --override-channels cuda-toolkit -y
 conda install -c conda-forge "gcc_linux-64=10.*" "gxx_linux-64=10.*" -y
+conda install -c conda-forge libxcrypt -y
 pip install torch==1.9.1+cu111 torchvision==0.10.1+cu111 torchaudio==0.9.1 \
     -f https://download.pytorch.org/whl/torch_stable.html
+pip install ninja                  # mmcv/mmdet3d 编译加速
+pip install "numpy==1.19.5"
+pip install "matplotlib==3.5.3" "scikit-image==0.19.3"
 pip install mmcv-full==1.4.0 \
     -f https://download.openmmlab.com/mmcv/dist/cu111/torch1.9/index.html
 pip install mmdet==2.14.0
 pip install mmsegmentation==0.14.1
 git clone https://github.com/open-mmlab/mmdetection3d.git
-cd mmdetection3d && git checkout -f v0.17.1 && python setup.py develop && cd ..
+cd mmdetection3d && git checkout -f v0.17.1 && python setup.py develop --no-deps && cd ..
 pip install nuscenes-devkit==1.1.9
 pip install pyquaternion shapely tqdm tensorboard
+# （scikit-image 已在上文 numpy 段统一安装，版本 0.19.3）
+```
+
+### 2.2 编译环境变量自动注入
+
+```bash
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
+cat > "$CONDA_PREFIX/etc/conda/activate.d/3090_env.sh" <<'EOF'
+export CUDA_HOME="$CONDA_PREFIX"
+export PATH="$CONDA_PREFIX/bin:$PATH"
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib64:$LD_LIBRARY_PATH"
+export TORCH_CUDA_ARCH_LIST="8.6"
+export PYTHONPATH="/data2/jhc/OARWM:$PYTHONPATH"   #改成你的仓库路径
+EOF
+
+mkdir -p "$CONDA_PREFIX/etc/conda/deactivate.d"
+cat > "$CONDA_PREFIX/etc/conda/deactivate.d/3090_env.sh" <<'EOF'
+unset CUDA_HOME
+unset TORCH_CUDA_ARCH_LIST
+export PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v "^$CONDA_PREFIX/bin$" | paste -sd:)
+export LD_LIBRARY_PATH=$(printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v "^$CONDA_PREFIX/lib64$" | paste -sd:)
+export PYTHONPATH=$(printf '%s' "$PYTHONPATH" | tr ':' '\n' | grep -v "^/data2/jhc/OARWM$" | paste -sd:)#改成你的仓库路径
+EOF
 ```
 
 > 编译提示：mmcv-full 1.4.0 / mmdet3d v0.17.1 的 CUDA 算子用 conda 的
@@ -76,7 +90,7 @@ pip install pyquaternion shapely tqdm tensorboard
 > 装不上），须用补丁版 `cuda-11.3.1` label（2026-07 实测 repodata 依赖闭环）。
 > 编译前建议设置 `export TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6"`（RTX 3090 = 8.6）。
 
-### 3.2 MiDaS 模型准备
+### 2.3 MiDaS 模型准备
 **下载权重**（GitHub release，一般无需翻墙；约 86 MB）：
 
 ```shell
@@ -106,9 +120,9 @@ repo/权重缺失时明确报错并自动回退 `MockDepthEstimator`（LiDAR den
 
 ---
 
-## 4. 数据准备（nuScenes）
+## 3. 数据准备（nuScenes）
 
-### 4.1 目录结构（放在仓库根下，与 `resworld_config.py` 的 `data_root` 一致）
+### 3.1 目录结构（放在仓库根下，与 `resworld_config.py` 的 `data_root` 一致）
 
 ```text
 OARWM/data/nuscenes/
@@ -118,12 +132,12 @@ OARWM/data/nuscenes/
 ├── samples_point_label/         # generate_point_label.py 输出
 ├── sweeps/                      # LiDAR sweeps
 ├── v1.0-trainval/               # 标注 JSON
-├── vad_nuscenes_infos_temporal_train.pkl   # VAD 生成（下载，见 3.2）
+├── vad_nuscenes_infos_temporal_train.pkl   # VAD 生成
 ├── vad_nuscenes_infos_temporal_val.pkl
 └── nuscenes_map_anns_val.json
 ```
 
-### 4.2 下载清单
+### 3.2 下载清单
 
 | 资源 | 来源 | 用途 |
 |---|---|---|
@@ -134,14 +148,14 @@ OARWM/data/nuscenes/
 | `geobev-r50-nuimage-cbgs.pth` | README Google Drive 链接 → 放 `ckpts/` | 预训练 backbone（`load_from`） |
 | 训练好的 `epoch_12_ema.pth`（可选） | README Google Drive 链接 | 直接评估 |
 
-### 4.3 生成深度标签（环境 resworld）
+### 3.3 生成深度标签（环境 resworld）
 
 ```shell
 conda activate resworld
 python tools/generate_point_label.py   # 按脚本顶部 dataroot/save_dir 配置执行
 ```
 
-### 4.4 磁盘与时间预算
+### 3.4 磁盘与时间预算
 
 - nuScenes 全量约 300+ GB（sweeps 占大头）；`samples_point_label` 额外数十 GB。
 - 基线 12 epoch 训练：8×RTX 3090 约数天（论文配置）；OARWM 训练同样在
@@ -149,9 +163,9 @@ python tools/generate_point_label.py   # 按脚本顶部 dataroot/save_dir 配�
 
 ---
 
-## 5. ResWorld 基线复现
+## 4. ResWorld 基线复现
 
-### 5.1 训练（4 GPU 示例，脚本见 `tools/dist_train.sh`）
+### 4.1 训练（4 GPU 示例，脚本见 `tools/dist_train.sh`）
 
 ```shell
 conda activate resworld
@@ -165,7 +179,7 @@ bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
   - BEV 网格 `grid_config`：`x∈[-15,15] @ 0.15 m`（200 cells）、`y∈[-30,30] @ 0.3 m`（200 cells）——**200×200 各向异性**，与世界模型 BEV 特征（`numC_Trans=80 → 256` 通道）对应。
   - 损失：depth loss + 检测 + 地图 + 规划（`loss_plan_reg=L1, w=10.0`，`plan_loss.py`）。
 
-### 5.2 评估（UniAD/VAD 风格开环指标）
+### 4.2 评估（UniAD/VAD 风格开环指标）
 
 ```shell
 bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
@@ -185,9 +199,9 @@ bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
 
 ---
 
-## 6. OSZ 模块复现
+## 5. OSZ 模块复现
 
-### 6.1 本地快速验证（无需 nuScenes/torch，任何机器可跑）
+### 5.1 本地快速验证（无需 nuScenes/torch，任何机器可跑）
 
 ```shell
 conda activate resworld  # mock 不需要 torch/深度模型，任意环境即可
@@ -198,7 +212,7 @@ python OSZ/run_osz_pipeline.py --mock --outdir ./osz_output
 semi / 组合 / 统计）+ `summary.csv`。已验证可跑通（200×200 网格，
 mock 场景 ground 与 eye 阴影一致）。
 
-### 6.2 真实数据运行（服务器，resworld 环境）
+### 5.2 真实数据运行（服务器，resworld 环境）
 
 ```shell
 python OSZ/run_osz_pipeline.py \
@@ -216,7 +230,7 @@ python OSZ/run_osz_pipeline.py \
 `gt_osz_*.png`、`osz_explained_*.png` + `summary{suffix}.csv`
 （occupied / osz_ground / osz_eye / semi 比例）。
 
-### 6.3 关键参数（`OSZ/config.py`，BEV 网格定义于 `OSZ/config.py` 并对齐 ResWorld `grid_config`）
+### 5.3 关键参数（`OSZ/config.py`，BEV 网格定义于 `OSZ/config.py` 并对齐 ResWorld `grid_config`）
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
@@ -231,7 +245,7 @@ python OSZ/run_osz_pipeline.py \
 
 ---
 
-## 7. OARWM-Res 集成路径（Stage 2 → 6）
+## 6. OARWM-Res 集成路径（Stage 2 → 6）
 
 OSZ 已实现设计文档 **Stage 2** 的 1-6 步（输出 `bev_height`、`osz_ground`、
 `osz_eye`、`semi`、`drivable_mask`）；Stage 1/3/5 继承 ResWorld（`projects/`），
@@ -270,7 +284,7 @@ Stage 6 新损失**均为待实现部分**。集成时注意以下接口事实�
 
 ---
 
-## 8. 服务器部署检查清单
+## 7. 服务器部署检查清单
 
 ```shell
 nvidia-smi                      # GPU 可用 & 驱动（conda CUDA 不含驱动，驱动必须系统装）
