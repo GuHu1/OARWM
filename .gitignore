@@ -1,0 +1,13 @@
+data
+.vscode
+*/__pycache__/*
+work_dirs
+ckpts
+**/*.pyc
+*.log
+tests
+*.pth
+.reasonix
+.pytest_cache/
+*.tmp_*/
+OSZ/output/
