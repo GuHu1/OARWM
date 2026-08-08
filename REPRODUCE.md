@@ -10,7 +10,7 @@
 OARWM/
 ├── OARWM_ResWorld.md            # OARWM-Res 改进设计文档（Stage 1-6）
 ├── OSZ/                         # 高度感知遮挡阴影区流水线（设计文档 Stage 2）
-│   ├── config.py                #   BEV 网格（对齐 ResWorld grid_config，200×200 各向异性）+ 高度/眼高/深度/相机/HD-map 参数
+│   ├── config.py                #   BEV 网格 + 高度/眼高/深度/相机/HD-map 参数
 │   ├── run_osz_pipeline.py      #   端到端主入口（单 sample/批量/mock）
 │   ├── modules/                 #   深度估计 → 反投影 → BEV 高度 → 射线投射 → drivable 过滤
 │   ├── utils/                   #   nuScenes 加载器（LiDAR 聚合/深度 densify/mock）
@@ -143,10 +143,9 @@ OARWM/data/nuscenes/
 |---|---|---|
 | nuScenes 完整 trainval（samples/sweeps/maps + 标注） | https://www.nuscenes.org/download | 训练/评估/OSZ |
 | nuScenes-lidarseg 标注 | 同上（lidarseg 包） | `generate_point_label.py` 生成 GeoBEV 深度标签 |
-| `vad_nuscenes_infos_temporal_train.pkl` | README Google Drive 链接（VAD 生成） | ResWorld 数据管线 |
-| `vad_nuscenes_infos_temporal_val.pkl` | 同上 | 评估 |
-| `geobev-r50-nuimage-cbgs.pth` | README Google Drive 链接 → 放 `ckpts/` | 预训练 backbone（`load_from`） |
-| 训练好的 `epoch_12_ema.pth`（可选） | README Google Drive 链接 | 直接评估 |
+| `vad_nuscenes_infos_temporal_train.pkl` | https://drive.google.com/file/d/1OVd6Rw2wYjT_ylihCixzF6_olrAQsctx/view?usp=sharing | ResWorld 数据管线 |
+| `vad_nuscenes_infos_temporal_val.pkl` | https://drive.google.com/file/d/16DZeA-iepMCaeyi57XSXL3vYyhrOQI9S/view?usp=sharing | 评估 |
+| `geobev-r50-nuimage-cbgs.pth` | https://drive.google.com/file/d/1B8Bz4_CpHGjgBrD84JbBJrAtx4TOnUG0/view?usp=sharing → 放 `ckpts/` | 预训练 backbone（`load_from`） |
 
 ### 3.3 生成深度标签（环境 resworld）
 
@@ -158,7 +157,7 @@ python tools/generate_point_label.py   # 按脚本顶部 dataroot/save_dir 配�
 ### 3.4 磁盘与时间预算
 
 - nuScenes 全量约 300+ GB（sweeps 占大头）；`samples_point_label` 额外数十 GB。
-- 基线 12 epoch 训练：8×RTX 3090 约数天（论文配置）；OARWM 训练同样在
+- 基线 12 epoch 训练：8×RTX 3090 约数天；OARWM 训练同样在
   8×RTX 3090（torch 1.9.1 生态），`samples_per_gpu=2` 可按显存调整。
 
 ---
