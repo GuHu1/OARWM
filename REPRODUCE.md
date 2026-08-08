@@ -47,7 +47,7 @@ conda install -c conda-forge "gcc_linux-64=10.*" "gxx_linux-64=10.*" -y
 conda install -c conda-forge libxcrypt -y
 pip install torch==1.9.1+cu111 torchvision==0.10.1+cu111 torchaudio==0.9.1 \
     -f https://download.pytorch.org/whl/torch_stable.html
-pip install ninja plyfile black flake8 plotly pytest
+pip install ninja plyfile black flake8 plotly pytest pyquaternion shapely tqdm tensorboard
 pip install "numpy==1.19.5" "matplotlib==3.5.3" "scikit-image==0.19.3" "networkx==2.2" "pandas==1.4.4" "yapf==0.31.0"
 pip install "numba==0.56.4"
 pip install mmcv-full==1.4.0 \
@@ -60,10 +60,10 @@ cd mmdetection3d && git checkout -f v0.17.1 && python setup.py develop --no-deps
 sed -i 's/from numba.errors import NumbaPerformanceWarning/from numba.core.errors import NumbaPerformanceWarning/' \
     mmdetection3d/mmdet3d/datasets/pipelines/data_augment_utils.py
 pip install nuscenes-devkit==1.1.9
-pip install pyquaternion shapely tqdm tensorboard
+sed -i 's/self.class_names = self.class_range.keys()/self.class_names = list(self.class_range.keys())/' \
+    $CONDA_PREFIX/lib/python3.8/site-packages/nuscenes/eval/detection/data_classes.py
 sed -i 's/^from setuptools import distutils$/import distutils.version/' \
     $CONDA_PREFIX/lib/python3.8/site-packages/torch/utils/tensorboard/__init__.py
-# （scikit-image 已在上文 numpy 段统一安装，版本 0.19.3；
 ```
 
 ### 2.2 编译环境变量自动注入
@@ -220,14 +220,13 @@ mock 场景 ground 与 eye 阴影一致）。
 
 ```shell
 python OSZ/run_osz_pipeline.py \
-    --dataroot /path/to/nuscenes \
-    --version v1.0-mini \          # 或 v1.0-trainval
+    --dataroot data/nuscenes \
+    --version v1.0-trainval \          # 或 v1.0-trainval
     --outdir ./osz_output \
     --max_samples 10 \
-    --use_drivable \               # 需要 maps/；HD-map 缺失时自动回退全 True
-    --use_uncertainty \            # inverse-uncertainty 相机-LiDAR 融合
-    --n_sweeps 0                   # 默认 0：仅关键帧 LiDAR，避免 OSZ 虚高
-# 单 sample：--sample_token <TOKEN>
+    --use_drivable \
+    --use_uncertainty \
+    --n_sweeps 0
 ```
 
 产出：每帧 `height_aware_osz_<token>_sweeps0[_uncertainty][_drivable].png`、

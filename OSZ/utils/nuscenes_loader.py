@@ -432,6 +432,9 @@ class NuScenesOSZLoader:
             print(f"[INFO] nuScenes data not found at {dataroot}. Using synthetic mock.")
             self._use_mock = True
             self.n_mock = max_samples or 3
+            # Mock samples so callers reading ``loader.samples`` work too
+            # (export_osz_dataset.py lists tokens via loader.samples).
+            self.samples = [{"token": f"mock_{i:04d}"} for i in range(self.n_mock)]
 
     def __len__(self):
         """Return the number of frames (real samples or mock frames)."""

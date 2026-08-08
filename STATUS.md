@@ -47,7 +47,7 @@ python OSZ/run_osz_pipeline.py --dataroot /data/nuscenes \
     --version v1.0-mini --max_samples 1 --outdir ./osz_output
 # 3) 批量导出 OSZ 掩码（nuScenes 官方划分：train 28130 + val 6019 = 34149 帧；
 #    可用 --shard/--num_shards 并行）
-python OSZ/export_osz_dataset.py --dataroot /data/nuscenes \
+python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
     --version v1.0-trainval --outdir data/osz --use_drivable --num_workers 8
 # 或外壳分片并行：--shard $i --num_shards 8（tmux 起 8 个进程）
 # 已导出的 token 默认跳过（断点续跑）；重新生成加 --overwrite
