@@ -45,12 +45,13 @@ python OSZ/run_osz_pipeline.py --dataroot data/nuscenes \
     --version v1.0-mini --max_samples 1 --outdir ./osz_output
 
 # 3) 批量导出 OSZ 掩码（nuScenes 官方划分：train 28130 + val 6019 = 34149 帧；
+mkdir -p work_dirs/logs
 for i in $(seq 0 7); do
-  python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
+  nohup python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
       --version v1.0-trainval --outdir data/osz --use_drivable \
-      --shard $i --num_shards 8 &
+      --shard $i --num_shards 8 \
+      > work_dirs/logs/osz_shard_$i.log 2>&1 &
 done
-
 # 4) 训练/评估
 bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
 ```
