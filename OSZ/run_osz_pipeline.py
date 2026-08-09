@@ -56,7 +56,6 @@ from OSZ.modules.drivable_filter import build_drivable_mask, filter_osz_by_driva
 from OSZ.visualize.bev_viz import (
     _bev_extent,
     plot_gt_osz,
-    plot_osz_explained,
 )
 
 
@@ -680,7 +679,7 @@ def main() -> None:
                     loader.nusc, token, bev_range
                 )
 
-        save_path = Path(args.outdir) / f"height_aware_osz_{token}{suffix}.png"
+        save_path = Path(args.outdir) / f"osz_{token}{suffix}.png"
         stats = visualize_height_aware_osz(
             frame,
             str(save_path),
@@ -728,22 +727,6 @@ def main() -> None:
                 plt.close(fig_gt)
             except Exception as e:
                 print(f"[WARN] GT visualization failed: {e}")
-
-            try:
-                exp_save_path = Path(args.outdir) / f"osz_explained_{token}{suffix}.png"
-                fig_exp = plot_osz_explained(
-                    osz_pa=stats["osz_ground_mask"],
-                    bev_occ=stats["bev_occ"],
-                    drivable_mask=drivable_mask,
-                    bev_range=bev_range,
-                    sample_token=token,
-                    save_path=str(exp_save_path),
-                    draw_lanes=True,
-                    nusc=loader.nusc,
-                )
-                plt.close(fig_exp)
-            except Exception as e:
-                print(f"[WARN] OSZ explained viz failed: {e}")
 
         all_stats.append({
             k: v for k, v in stats.items()
