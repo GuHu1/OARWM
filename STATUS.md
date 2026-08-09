@@ -1,7 +1,7 @@
 # OARWM-Res 项目状态（Stage 2 接入完成）
 
 > 最后更新：2026-07（本次改造）
-> 设计文档：`OARWM_ResWorld.md` · 复现指南：`REPRODUCE.md`
+> 设计文档：`OARWM_ResWorld.md` · 安装/数据准备：`INSTALL.md` · 训练：见本文档 §3
 
 ---
 
@@ -39,21 +39,17 @@ git clone https://github.com/isl-org/MiDaS.git OSZ/third_party/MiDaS
 ### 2.2 服务器验证（按顺序）
 
 ```shell
-# 1) OSZ mock 冒烟（不依赖数据/权重）
-python OSZ/run_osz_pipeline.py --mock --max_samples 1 --outdir ./osz_output
 # 2) MiDaS 真实深度估计冒烟（权重就位后，任意一张图）
 #    期望看到 [align_to_lidar] ... inverse 拟合日志（无 LiDAR 时仅相对深度）
-python OSZ/run_osz_pipeline.py --dataroot /data/nuscenes \
+python OSZ/run_osz_pipeline.py --dataroot data/nuscenes \
     --version v1.0-mini --max_samples 1 --outdir ./osz_output
 # 3) 批量导出 OSZ 掩码（nuScenes 官方划分：train 28130 + val 6019 = 34149 帧；
 #    可用 --shard/--num_shards 并行）
 python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
     --version v1.0-trainval --outdir data/osz --use_drivable --num_workers 8
 # 或外壳分片并行：--shard $i --num_shards 8（tmux 起 8 个进程）
-# 已导出的 token 默认跳过（断点续跑）；重新生成加 --overwrite
 # 4) ResWorld 训练/评估（无 OSZ 数据时全零掩码，与基线严格等价）
 bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
-# 5) 对比验证（建议）：先训/测基线（无 osz_dir），再训/测 OARWM（有 osz_dir）
 ```
 
 ### 2.3 验证状态说明
@@ -63,7 +59,43 @@ bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
 
 ---
 
-## 3. 下一步改造路线（按设计文档 Stage 3 → 6）
+## 3. 训练与评估（基线；OSZ 掩码注入版同命令）
+
+### 3.1 训练
+
+```shell
+conda activate resworld
+# 前置：data/nuscenes/ 与 ckpts/geobev-r50-nuimage-cbgs.pth 就绪
+bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
+```
+
+- 输出 `work_dirs/resworld_config/`，EMA 权重 `epoch_12_ema.pth`。
+- 配置要点（`resworld_config.py`）：图像 256×704（源 900×1600）、6 相机、`num_frames=3`（`multi_adj_frame_id_cfg=(1, 1+2, 1)`）；BEV 网格 200×200 各向异性（x∈[-15,15]@0.15 m、y∈[-30,30]@0.3 m）；loss = depth + 检测 + 地图 + 规划（`loss_plan_reg=L1, w=10.0`）。
+- OSZ：`osz_dir='data/osz/'` 按 token 加载掩码（`OcclusionAwareFusion` 注入 `B̃=B⊙(1-M)+E_occ⊙M`）；未导出时全零回退 = 基线等价。
+
+### 3.2 评估（UniAD/VAD 风格开环指标）
+
+```shell
+bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
+    work_dirs/resworld_config/epoch_12_ema.pth 4 --eval bbox
+```
+
+官方参考指标（README）：
+
+| 指标 | L2 1s | L2 2s | L2 3s | L2 Avg | CR 1s | CR 2s | CR 3s | CR Avg |
+|---|---|---|---|---|---|---|---|---|
+| L2_MAX / CR_MAX | 0.19 | 0.50 | 1.08 | 0.59 | 0.02 | 0.06 | 0.43 | 0.17 |
+| L2_AVG / CR_AVG | 0.14 | 0.27 | 0.49 | 0.30 | 0.01 | 0.03 | 0.14 | 0.06 |
+
+### 3.3 数据说明
+
+- `vad_nuscenes_infos_temporal_*.pkl` 直接用 VAD 生成文件；`tools/data_converter/vad_nuscenes_converter.py` 仅在需要自行生成时用。
+- `nuscenes_map_anns_val.json` 首次评估时由代码自动生成（见 `nuscenes_vad_dataset.py::_format_gt`）。
+- `samples_per_gpu=2`（8×RTX 3090），可按显存调整。
+
+---
+
+## 4. 下一步改造路线（按设计文档 Stage 3 → 6）
 
 1. **Stage 3 遮挡区多假设随机残差转移（MHST）** —— 本次接入的核心接口已就位：
    - 掩码已在 head 内可用（`osz_mask`，200×200，与 BEV 特征同格）→ 可见/遮挡位置路由的输入就绪；
@@ -76,10 +108,10 @@ bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
 
 ---
 
-## 4. 已知限制
+## 5. 已知限制
 
 - **深度范围**：MiDaS 输出逆深度经 LiDAR 对齐后为 metric 深度，但无 LiDAR 区域仅相对深度（不可反投影）——与旧 DA V2 路线一致，OSZ 依赖 LiDAR 对齐。
 - **OSZ 网格前方仅 ±15 m**（跟随 ResWorld `grid_config`）：>15 m 前方遮挡物不在世界模型 BEV 内；若需更远，需同时改 ResWorld `grid_config` 与 `OSZ/config.py`（单一来源同步）。
 - **各向异性近似**：射线投射在 cell 空间为直线，物理空间角度略拉伸（0.15 vs 0.3 m/cell），OSZ 几何为近似（设计可接受）。
 - **drivable 膨胀**：按较粗轴（0.3 m）迭代膨胀，x 方向实际膨胀 0.75 m（1.5 m 的设定值折半），偏保守方向安全。
-- `OSZ/Height_aware_bev_osz.md` 与 `OSZ/PROJECT_STATUS.md` 为历史文档，顶部已加过时注记（其中 ±50 m 网格、`common/`、`pa_osz_mining` 缓存描述不再适用）。
+- `OSZ/README.md`（原 `Height_aware_bev_osz.md`，2026-08 重写为"参数/安装/运行"手册）与 `OSZ/PROJECT_STATUS.md` 为历史/维护文档；±50 m 网格、`common/`、`pa_osz_mining` 缓存等旧描述不再适用，以 `OSZ/config.py` 与仓库根 `STATUS.md` 为准。

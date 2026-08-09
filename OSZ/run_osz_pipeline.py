@@ -691,6 +691,27 @@ def main() -> None:
             drivable_mask=drivable_mask,
         )
 
+        # 6-camera image panel (raw RGB for cross-checking against BEV OSZ).
+        try:
+            cam_save = Path(args.outdir) / f"cameras_{token}{suffix}.png"
+            fig_cam, axes_cam = plt.subplots(2, 3, figsize=(15, 8))
+            axes_cam = np.array(axes_cam).ravel()
+            for ax, (cam_name, cam_data) in zip(axes_cam, frame["cameras"].items()):
+                ax.imshow(cam_data["image"])
+                ax.set_title(cam_name, fontsize=10)
+                ax.axis("off")
+            for ax in axes_cam[len(frame["cameras"]):]:
+                ax.axis("off")
+            fig_cam.suptitle(
+                f"Cameras — {token}", fontsize=14, fontweight="bold", y=0.98
+            )
+            fig_cam.tight_layout(rect=[0, 0, 1, 0.96])
+            fig_cam.savefig(cam_save, dpi=120, bbox_inches="tight")
+            plt.close(fig_cam)
+            print(f"  [saved] {cam_save}")
+        except Exception as e:
+            print(f"[WARN] camera panel viz failed: {e}")
+
         # GT overlay: generate when drivable mask is available and not mock.
         if drivable_mask is not None and not args.mock and hasattr(loader, "nusc"):
             try:

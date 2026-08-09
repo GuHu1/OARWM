@@ -86,7 +86,7 @@ MIDAS_MODEL_URL: str = (
     "https://github.com/isl-org/MiDaS/releases/download/v2_1/"
     "midas_v21_small_256.pt"
 )
-"""Upstream URL for manual download (documented in REPRODUCE.md); not fetched at runtime."""
+"""Upstream URL for manual download (documented in INSTALL.md); not fetched at runtime."""
 
 MIN_ALIGN_POINTS: int = 20
 """Minimum LiDAR points required for depth-scale alignment."""

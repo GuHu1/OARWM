@@ -89,7 +89,7 @@ class DepthEstimator:
         if not Path(self.model_path).exists():
             raise FileNotFoundError(
                 f"MiDaS checkpoint not found at {self.model_path}.\n"
-                f"Download it once (see REPRODUCE.md 3.3):\n  {cfg.MIDAS_MODEL_URL}"
+                f"Download it once (see INSTALL.md 2.3):\n  {cfg.MIDAS_MODEL_URL}"
             )
 
         print(
