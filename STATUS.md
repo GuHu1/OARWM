@@ -36,7 +36,7 @@ git clone https://github.com/isl-org/MiDaS.git OSZ/third_party/MiDaS
 # 注：无需 timm——MiDaS_small 是 EfficientNet-Lite3 编码器，不是 DPT
 ```
 
-### 2.2 服务器验证（按顺序）
+### 2.2 服务器验证
 
 ```shell
 # 2) MiDaS 真实深度估计冒烟（权重就位后，任意一张图）
