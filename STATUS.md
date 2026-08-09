@@ -43,12 +43,15 @@ git clone https://github.com/isl-org/MiDaS.git OSZ/third_party/MiDaS
 #    期望看到 [align_to_lidar] ... inverse 拟合日志（无 LiDAR 时仅相对深度）
 python OSZ/run_osz_pipeline.py --dataroot data/nuscenes \
     --version v1.0-mini --max_samples 1 --outdir ./osz_output
+
 # 3) 批量导出 OSZ 掩码（nuScenes 官方划分：train 28130 + val 6019 = 34149 帧；
-#    可用 --shard/--num_shards 并行）
-python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
-    --version v1.0-trainval --outdir data/osz --use_drivable --num_workers 8
-# 或外壳分片并行：--shard $i --num_shards 8（tmux 起 8 个进程）
-# 4) ResWorld 训练/评估（无 OSZ 数据时全零掩码，与基线严格等价）
+for i in $(seq 0 7); do
+  python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
+      --version v1.0-trainval --outdir data/osz --use_drivable \
+      --shard $i --num_shards 8 &
+done
+
+# 4) 训练/评估
 bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
 ```
 
@@ -59,7 +62,7 @@ bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
 
 ---
 
-## 3. 训练与评估（基线；OSZ 掩码注入版同命令）
+## 3. 训练与评估
 
 ### 3.1 训练
 
