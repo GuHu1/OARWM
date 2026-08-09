@@ -68,20 +68,18 @@ git clone https://github.com/isl-org/MiDaS.git OSZ/third_party/MiDaS
 ## 运行
 
 ```bash
-# 1) 单帧可视化（6 面板 PNG + 统计 CSV，可叠加 GT/车道）
+# 1) 单帧可视化
 python OSZ/run_osz_pipeline.py --dataroot data/nuscenes \
     --version v1.0-trainval --sample_token <TOKEN> \
-    --outdir osz_output --use_drivable
+    --outdir data/osz_viz --use_drivable
 
 # 2) 批量导出掩码
-python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
-    --version v1.0-trainval --outdir data/osz --use_drivable
-
+mkdir -p work_dirs/logs
 for i in $(seq 0 7); do
-  python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
+  nohup python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
       --version v1.0-trainval --outdir data/osz --use_drivable \
-      --shard $i --num_shards 8 &
+      --shard $i --num_shards 8 \
+      > work_dirs/logs/osz_shard_$i.log 2>&1 &
 done
-wait
 ls data/osz | wc -l   # 全量 = 34149（train+val）
 ```
