@@ -121,6 +121,8 @@ class ResWorldHead(BaseModule):
                  loss_plan_reg=dict(type='L1Loss', loss_weight=0.25),
                  ego_lcf_feat_idx=None,
                  valid_fut_ts=6,
+                 # Injection gate: True iff any mask source is active
+                 # (config: use_osz = use_osz_midas or use_osz_rcsample).
                  use_osz=False,
                  **kwargs):
         super(ResWorldHead, self).__init__()

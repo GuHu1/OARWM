@@ -381,7 +381,7 @@ def build_osz_mask_online(
 ) -> "torch.Tensor":
     """Compute an OSZ mask online from the model's own depth distribution.
 
-    Used by ``ResWorld(use_rcsample=True)``: the RCSample depth (already
+    Used by ``ResWorld(use_osz_rcsample=True)``: the RCSample depth (already
     produced by the view transformer) is turned into a metric depth map,
     back-projected with the *effective* intrinsics of the augmented image,
     and run through the GPU OSZ geometry.

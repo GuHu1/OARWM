@@ -243,7 +243,7 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 - `L_uncertainty`（校准）：`|Σ - ‖e‖²|`，`e` 为遮挡区预测误差。
 - 以上损失均以掩码选择遮挡区位置计算，权重系数进 `resworld_config.py`。
 
-**配置开关**（对齐现有 `use_osz` 风格，一个 Stage 一个开关）：
+**配置开关**（对齐现有 `use_osz_midas` / `use_osz_rcsample` 风格，一个 Stage 一组开关）：
 
 ```python
 use_mhst = True       # Stage 3 总开关；False = 跳过 MHST-Head，pred_bev 直通（严格基线）

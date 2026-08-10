@@ -55,9 +55,11 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
         *args,
         **kwargs
     ):
-        # Stage-2 OSZ switch: config must opt in explicitly (`use_osz=True`).
-        # When off, `osz_mask` is not produced at all — the model receives
-        # None and the occlusion fusion branch is skipped (strict baseline).
+        # Stage-2 OSZ, offline source: `use_osz` here is the config's
+        # `use_osz_midas` (precomputed {token}.npz masks). When off, no npz
+        # is loaded — online masks (`use_osz_rcsample`) are computed by the
+        # model itself, so the dataset stays out of it (strict baseline =
+        # both sources off).
         self.use_osz = kwargs.pop('use_osz', False)
         self.osz_dir = kwargs.pop('osz_dir', None)
         super().__init__(*args, **kwargs)

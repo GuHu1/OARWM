@@ -13,18 +13,20 @@ class ResWorld(BEVDepth4D):
     def __init__(self, 
                 fut_ts=6,
                 fut_mode=6, 
-                use_rcsample=False,
+                use_osz_rcsample=False,
                 **kwargs):
         super(ResWorld, self).__init__(**kwargs)
         self.fut_ts = fut_ts
         self.fut_mode = fut_mode
         # Online (same-source) OSZ: use the model's own RCSample depth to
         # compute the occlusion mask in the training/inference loop instead
-        # of loading precomputed {token}.npz masks. Orthogonal to use_osz:
-        #   use_osz=False                 -> no mask (baseline)
-        #   use_osz=True  + False (this)  -> offline npz masks
-        #   use_osz=True  + True  (this)  -> online RCSample masks
-        self.use_rcsample = use_rcsample
+        # of loading precomputed {token}.npz masks. Mutually exclusive with
+        # the offline source (use_osz_midas in the config); the head's
+        # injection gate use_osz is True iff either source is active:
+        #   use_osz_midas=False & use_osz_rcsample=False -> baseline
+        #   use_osz_midas=True                           -> offline npz masks
+        #   use_osz_rcsample=True (this)                 -> online RCSample masks
+        self.use_osz_rcsample = use_osz_rcsample
         self._osz_bin_center = None
         self.planning_metric = None
 
@@ -143,7 +145,7 @@ class ResWorld(BEVDepth4D):
             points, img=img_inputs, img_metas=img_metas, **kwargs)
         loss_depth = self.img_view_transformer.get_depth_loss(gt_depth, depth)
         losses = dict(loss_depth=loss_depth)
-        if self.use_rcsample:
+        if self.use_osz_rcsample:
             # Online (same-source) OSZ: mask from the model's own depth.
             # Overrides any dataset-loaded osz_mask (offline npz path); the
             # discrete geometry detaches it, so it conditions like GT masks.
@@ -254,7 +256,7 @@ class ResWorld(BEVDepth4D):
         """Test function without augmentaiton."""
         img_feats, _, depth = self.extract_feat(
             points, img=img_inputs, img_metas=img_metas, **kwargs)
-        if self.use_rcsample and depth is not None:
+        if self.use_osz_rcsample and depth is not None:
             # Online (same-source) mask at test time too (deployment form);
             # overrides the offline osz_mask passed by forward_test.
             osz_mask = self.build_osz_mask_online(depth, img_inputs)

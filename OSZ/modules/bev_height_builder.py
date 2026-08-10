@@ -84,13 +84,13 @@ def _prepare_camera_depths(
         from OSZ.modules.depth_estimator import MockDepthEstimator
         from OSZ.modules.rcsample_depth_estimator import RCSampleDepthEstimator
         use_mock = isinstance(estimator, MockDepthEstimator)
-        use_rcsample = isinstance(estimator, RCSampleDepthEstimator)
+        is_rcsample = isinstance(estimator, RCSampleDepthEstimator)
         cam_depths = {}
         for cam_name, cam_data in cameras.items():
             # RCSample's camera-aware depth head conditions on intrinsics and
             # camera->ego extrinsics; pass them through when available.
             est_kwargs = {}
-            if use_rcsample:
+            if is_rcsample:
                 est_kwargs = dict(
                     K=cam_data['K'],
                     T_cam2ego=cam_data['T_cam2ego'],

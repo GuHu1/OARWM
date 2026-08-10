@@ -3,27 +3,26 @@ _base_ = [
     '../_base_/default_runtime.py'
 ]
 
-# --- Stage-2 OSZ switch ---
-# True  = inject OSZ occlusion masks (Stage 2, OARWM).
-# False = strict baseline / "w/o explicit occlusion mask" ablation (5.2-1):
-#         osz_mask is neither loaded nor collected; the model's occlusion
-#         fusion branch is skipped entirely (zero overhead, baseline-equal).
+# --- Stage-2 OSZ switches (mutually exclusive mask sources) ---
+# False/False = strict baseline / "w/o explicit occlusion mask" ablation
+#               (5.2-1): no mask at all — osz_mask is neither loaded nor
+#               collected; the head's occlusion fusion branch is skipped
+#               entirely (zero overhead, baseline-equal).
+# use_osz_midas    = offline masks: precomputed {token}.npz (MiDaS depth)
+#                    loaded by the dataset pipeline. The LiDAR upper-bound
+#                    arm reuses this switch — the depth source is decided
+#                    by which npz dir `osz_dir` points at.
+# use_osz_rcsample = online same-source masks: the ResWorld model's own
+#                    RCSample depth (already computed by the view
+#                    transformer) produces the mask inside the train/test
+#                    loop (GPU OSZ geometry adds tens of ms/step).
 # One switch per stage; later stages (3+) get their own flags.
-use_osz = True
-
-# --- OSZ mask source ---
-# False = offline masks: precomputed {token}.npz (MiDaS/LiDAR depth) are
-#         loaded by the dataset pipeline (use_osz must be True to inject).
-# True  = online (same-source) masks: the ResWorld model's own RCSample
-#         depth produces the mask inside the training/inference loop
-#         (depth is already computed by the view transformer; the GPU OSZ
-#         geometry adds tens of ms/step). Orthogonal to use_osz:
-#           use_osz=False             -> no mask at all (baseline)
-#           use_osz=True  + False     -> offline npz masks
-#           use_osz=True  + True      -> online RCSample masks
-#         With True, set use_osz=False to skip npz IO (masks are computed,
-#         not loaded).
-use_rcsample = False
+use_osz_midas = False
+use_osz_rcsample = False
+assert not (use_osz_midas and use_osz_rcsample), \
+    'use_osz_midas and use_osz_rcsample are mutually exclusive'
+# Injection gate for the head: True iff any mask source is active.
+use_osz = use_osz_midas or use_osz_rcsample
 
 #
 plugin = True
@@ -98,7 +97,7 @@ model = dict(
     type='ResWorld',
     align_after_view_transfromation=False,
     num_adj=len(range(*multi_adj_frame_id_cfg)),
-    use_rcsample=use_rcsample,
+    use_osz_rcsample=use_osz_rcsample,
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -149,7 +148,7 @@ model = dict(
         num_reg_fcs=2,
         ego_lcf_feat_idx=None,
         valid_fut_ts=6,
-        use_osz=use_osz,
+        use_osz=use_osz,  # injection gate (offline or online source)
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,
@@ -247,7 +246,7 @@ train_pipeline = [
     dict(type='CustomCollect3D',\
          keys=['gt_bboxes_3d', 'gt_labels_3d', 'img_inputs', 'ego_his_trajs', 'gt_depth', 'can_bus',
                'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels']
-         + (['osz_mask'] if use_osz else []))
+         + (['osz_mask'] if use_osz_midas else []))
 ]
 
 test_pipeline = [
@@ -273,7 +272,7 @@ test_pipeline = [
                  keys=['img_inputs', 'gt_bboxes_3d', 'gt_labels_3d', 'fut_valid_flag', 'can_bus',
                        'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd',
                        'ego_lcf_feat', 'gt_attr_labels']
-                 + (['osz_mask'] if use_osz else []))])
+                 + (['osz_mask'] if use_osz_midas else []))])
 ]
 
 data = dict(
@@ -292,10 +291,11 @@ data = dict(
         bev_size=(bev_h_, bev_w_),
         pc_range=point_cloud_range,
         queue_length=queue_length,
-        # Precomputed OSZ masks (see OSZ/export_osz_dataset.py), used only when
-        # use_osz=True. Empty/missing masks fall back to all-zeros = identity.
+        # Precomputed OSZ masks (see OSZ/export_osz_dataset.py), loaded only
+        # when use_osz_midas=True (offline source). Empty/missing masks fall
+        # back to all-zeros = identity.
         osz_dir='data/osz/',
-        use_osz=use_osz,
+        use_osz=use_osz_midas,
         # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
         # and box_type_3d='Depth' in sunrgbd and scannet dataset.
         box_type_3d='LiDAR',
@@ -308,7 +308,7 @@ data = dict(
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1,
              osz_dir='data/osz/',
-             use_osz=use_osz,
+             use_osz=use_osz_midas,
              map_classes=map_classes,
              map_ann_file=data_root + 'nuscenes_map_anns_val.json',
              map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_gt_line,
@@ -323,7 +323,7 @@ data = dict(
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality, samples_per_gpu=1,
               osz_dir='data/osz/',
-              use_osz=use_osz,
+              use_osz=use_osz_midas,
               map_classes=map_classes,
               map_ann_file=data_root + 'nuscenes_map_anns_val.json',
               map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_gt_line,
