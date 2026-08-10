@@ -33,7 +33,6 @@
 | `--version` | `v1.0-mini` | 数据集版本 |
 | `--sample_token` | 无 | 只处理单个样本 |
 | `--max_samples` | 1 | 处理帧数 |
-| `--mock` | 关 | 合成数据（无需 nuScenes） |
 | `--outdir` | `./osz_output` | PNG/CSV 输出目录 |
 | `--observer_height` | 1.2 | 观察者眼高 |
 | `--n_sweeps` | 0 | 聚合历史 LiDAR sweep 数（默认仅关键帧） |
@@ -43,7 +42,7 @@
 
 `OSZ/export_osz_dataset.py`（批量导出 npz）：`--dataroot --version --outdir
 --max_samples --use_drivable --use_uncertainty --num_workers --shard
---num_shards --overwrite --mock`。每个样本输出 `{outdir}/{token}.npz`，含
+--num_shards --overwrite`。每个样本输出 `{outdir}/{token}.npz`，含
 `bev_height / osz_ground / osz_eye / semi / drivable_mask`（均 200×200）。
 
 ## 环境安装

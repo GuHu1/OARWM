@@ -43,7 +43,7 @@ try:
     NUSCENES_AVAILABLE = True
 except ImportError:
     NUSCENES_AVAILABLE = False
-    print("[WARN] nuscenes-devkit not found; using synthetic mock data.")
+    print("[WARN] nuscenes-devkit not found; install it or check the env.")
 
 try:
     from PIL import Image
@@ -52,7 +52,6 @@ except ImportError:
     PIL_AVAILABLE = False
 
 from scipy.spatial import cKDTree
-from matplotlib import cm
 
 from OSZ import config as cfg
 
@@ -363,8 +362,9 @@ class NuScenesOSZLoader:
     sample token and per-camera data: dense depth maps, sparse depth
     maps, RGB images, intrinsics, and camera-to-ego transforms.
 
-    If the nuScenes devkit or data root is unavailable, the loader
-    yields synthetic mock frames instead.
+    The loader requires a real nuScenes dataset; if the devkit or data
+    root is unavailable it raises ``FileNotFoundError`` (no synthetic
+    data fallback).
 
     Parameters
     ----------
@@ -377,7 +377,7 @@ class NuScenesOSZLoader:
         Camera names to load. Defaults to ``cfg.NUSCENES_CAMERAS``.
     max_samples : int | None, optional
         Maximum number of samples to iterate. ``None`` iterates the
-        full dataset (or three mock frames when mocked).
+        full dataset.
     img_h : int, optional
         Output image height. Default is 900.
     img_w : int, optional
@@ -415,37 +415,37 @@ class NuScenesOSZLoader:
         img_w: int = 1600,
         n_sweeps: int = 0,
     ):
-        """Initialize the loader and select real or mock data source."""
+        """Initialize the loader from a real nuScenes dataset.
+
+        Raises
+        ------
+        FileNotFoundError
+            If the nuScenes devkit is unavailable or ``dataroot`` does
+            not exist.
+        """
         self.cameras = cameras or cfg.NUSCENES_CAMERAS
         self.max_samples = max_samples
         self.img_h = img_h
         self.img_w = img_w
         self.n_sweeps = n_sweeps
 
-        if NUSCENES_AVAILABLE and Path(dataroot).exists():
-            self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
-            self.samples = self.nusc.sample
-            if max_samples:
-                self.samples = self.samples[:max_samples]
-            self._use_mock = False
-        else:
-            print(f"[INFO] nuScenes data not found at {dataroot}. Using synthetic mock.")
-            self._use_mock = True
-            self.n_mock = max_samples or 3
-            # Mock samples so callers reading ``loader.samples`` work too
-            # (export_osz_dataset.py lists tokens via loader.samples).
-            self.samples = [{"token": f"mock_{i:04d}"} for i in range(self.n_mock)]
+        if not (NUSCENES_AVAILABLE and Path(dataroot).exists()):
+            raise FileNotFoundError(
+                f"nuScenes data not found at {dataroot} (or nuscenes-devkit "
+                f"missing). OSZ requires real data input."
+            )
+        self.nusc = NuScenes(version=version, dataroot=dataroot, verbose=False)
+        self.samples = self.nusc.sample
+        if max_samples:
+            self.samples = self.samples[:max_samples]
 
     def __len__(self):
-        """Return the number of frames (real samples or mock frames)."""
-        return self.n_mock if self._use_mock else len(self.samples)
+        """Return the number of frames (real samples)."""
+        return len(self.samples)
 
     def __iter__(self):
-        """Yield frames from the real dataset or the mock generator."""
-        if self._use_mock:
-            yield from self._mock_iter()
-        else:
-            yield from self._nuscenes_iter()
+        """Yield frames from the real dataset."""
+        yield from self._nuscenes_iter()
 
     def build_frame_for_token(self, sample_token: str) -> dict:
         """Build a single frame dict for ``sample_token`` without iterating.
@@ -520,111 +520,3 @@ class NuScenesOSZLoader:
         """Yield frames by iterating the loaded nuScenes samples."""
         for sample in self.samples:
             yield self.build_frame_for_token(sample['token'])
-
-    def _mock_iter(self):
-        """Yield synthetic mock frames when nuScenes data is unavailable.
-
-        The synthetic scene follows the nuScenes ego-frame convention
-        (``x`` forward, ``y`` left, ``z`` up) and camera-frame
-        convention (``z`` optical axis forward, ``x`` right, ``y``
-        down). It contains one solid box occluder roughly 12 m ahead of
-        the ego vehicle plus background objects behind it.
-        """
-        rng = np.random.default_rng(42)
-
-        K = np.array([
-            [1266.4, 0,      816.0],
-            [0,      1266.4, 491.5],
-            [0,      0,      1.0 ],
-        ], dtype=np.float32)
-
-        # nuScenes front camera extrinsic:
-        # cam_z(fwd) -> ego_x(fwd),  cam_x(right) -> -ego_y,  cam_y(down) -> -ego_z
-        def make_cam2ego(yaw_deg: float, tx: float, ty: float, tz: float) -> np.ndarray:
-            """Return camera -> ego transform for a given yaw and translation."""
-            # Base rotation: cam optical axis = ego forward
-            R_base = np.array([
-                [ 0, 0, 1],   # cam_z -> ego_x
-                [-1, 0, 0],   # cam_x -> -ego_y  (camera right = ego right = -ego_left)
-                [ 0,-1, 0],   # cam_y -> -ego_z
-            ], dtype=np.float32)
-            # Yaw rotation in ego frame
-            yaw = np.deg2rad(yaw_deg)
-            Rz = np.array([
-                [np.cos(yaw), -np.sin(yaw), 0],
-                [np.sin(yaw),  np.cos(yaw), 0],
-                [0,            0,           1],
-            ], dtype=np.float32)
-            R = Rz @ R_base
-            T = np.eye(4, dtype=np.float32)
-            T[:3, :3] = R
-            T[:3,  3] = [tx, ty, tz]
-            return T
-
-        # 3 front cameras with yaw offsets
-        cam_configs = [
-            # (name,            yaw_deg, tx,  ty,  tz)
-            ('CAM_FRONT',            0,  1.5,  0.0, 1.5),
-            ('CAM_FRONT_LEFT',      55,  1.5,  0.5, 1.5),
-            ('CAM_FRONT_RIGHT',    -55,  1.5, -0.5, 1.5),
-        ]
-
-        for i in range(self.n_mock):
-            frame = {'sample_token': f'mock_{i:04d}', 'cameras': {}}
-
-            ox = 12.0 + rng.uniform(-1.0, 1.0)   # occluder x (forward)
-            oy =  1.5 + rng.uniform(-0.3, 0.3)   # occluder y (lateral)
-
-            for cam_name, yaw_deg, tx, ty, tz in cam_configs:
-                if cam_name not in self.cameras:
-                    continue
-                T_cam2ego = make_cam2ego(yaw_deg, tx, ty, tz)
-
-                # Occluder front face (dense, facing ego)
-                box_pts = []
-                for dy in np.linspace(-1.5, 1.5, 50):
-                    for dz in np.linspace(0.05, 1.75, 35):
-                        box_pts.append([ox, oy + dy, dz])
-                # Occluder side walls
-                for dx in np.linspace(0, 4.0, 25):
-                    for dz in np.linspace(0.05, 1.75, 25):
-                        box_pts.append([ox + dx, oy - 1.5, dz])
-                        box_pts.append([ox + dx, oy + 1.5, dz])
-                box_pts = np.array(box_pts, dtype=np.float32)
-
-                # Ground plane
-                xs_g = np.linspace(1, 50, 80)
-                ys_g = np.linspace(-10, 10, 40)
-                xx, yy = np.meshgrid(xs_g, ys_g)
-                gnd = np.stack([xx.ravel(), yy.ravel(),
-                                np.zeros(xx.size)], axis=1).astype(np.float32)
-
-                # Background objects BEHIND occluder (should be shadow zone)
-                bg_pts = []
-                for dx in np.linspace(0, 5, 20):
-                    for dy in np.linspace(-1.2, 1.2, 20):
-                        for dz in np.linspace(0.1, 1.6, 10):
-                            bg_pts.append([ox + 5 + dx, oy + dy, dz])
-                bg_pts = np.array(bg_pts, dtype=np.float32)
-
-                pts_ego = np.concatenate([box_pts, gnd, bg_pts], axis=0)
-                depth_sparse = project_lidar_to_camera(
-                    pts_ego, K, T_cam2ego, self.img_h, self.img_w
-                )
-                depth_dense = densify_depth_map(depth_sparse)
-
-                # Synthetic reference image from dense depth visualization
-                depth_norm = depth_dense / (depth_dense.max() + 1e-6)
-                image = (cm.viridis(depth_norm)[:, :, :3] * 255).astype(np.uint8)
-
-                frame['cameras'][cam_name] = {
-                    'depth_map': depth_dense,
-                    'depth_map_sparse': depth_sparse,
-                    'image':     image,
-                    'K':         K,
-                    'T_cam2ego': T_cam2ego,
-                    'img_h':     self.img_h,
-                    'img_w':     self.img_w,
-                }
-
-            yield frame

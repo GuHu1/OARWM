@@ -340,6 +340,31 @@ class DepthEstimator:
 
         return depth_rel
 
+    def infer_tensor(
+        self,
+        image: np.ndarray,
+        lidar_sparse_depth: Optional[np.ndarray] = None,
+        target_size: Optional[tuple] = None,
+        K: Optional[np.ndarray] = None,
+        T_cam2ego: Optional[np.ndarray] = None,
+        device: Optional[str] = None,
+        **kwargs,
+    ) -> "torch.Tensor":
+        """Like :meth:`infer` but returns the depth on the compute device.
+
+        The MiDaS forward runs on GPU; the LiDAR scale alignment stays on
+        CPU (reuses :meth:`align_to_lidar`, correct by construction), then
+        the metric depth map is moved to ``device``. The single depth-map
+        copy (~34 MB for 6x900x1600) is negligible next to the geometry.
+        """
+        import torch
+
+        metric = self.infer(
+            image, lidar_sparse_depth=lidar_sparse_depth,
+            target_size=target_size,
+        )
+        return torch.from_numpy(metric).to(device or self.device)
+
 
 class MockDepthEstimator:
     """Stand-in depth estimator used when no network/model is available.

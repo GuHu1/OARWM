@@ -82,18 +82,30 @@ def _prepare_camera_depths(
     """
     if estimator is not None:
         from OSZ.modules.depth_estimator import MockDepthEstimator
+        from OSZ.modules.rcsample_depth_estimator import RCSampleDepthEstimator
         use_mock = isinstance(estimator, MockDepthEstimator)
+        use_rcsample = isinstance(estimator, RCSampleDepthEstimator)
         cam_depths = {}
         for cam_name, cam_data in cameras.items():
+            # RCSample's camera-aware depth head conditions on intrinsics and
+            # camera->ego extrinsics; pass them through when available.
+            est_kwargs = {}
+            if use_rcsample:
+                est_kwargs = dict(
+                    K=cam_data['K'],
+                    T_cam2ego=cam_data['T_cam2ego'],
+                )
             if use_mock:
                 pred = estimator.infer(
                     cam_data['image'],
                     lidar_dense_depth=cam_data.get('depth_map'),
+                    **est_kwargs,
                 )
             else:
                 pred = estimator.infer(
                     cam_data['image'],
                     lidar_sparse_depth=cam_data.get('depth_map_sparse'),
+                    **est_kwargs,
                 )
             cam_depths[cam_name] = {
                 'depth_map': pred,

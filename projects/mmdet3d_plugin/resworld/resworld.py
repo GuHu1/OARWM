@@ -13,11 +13,44 @@ class ResWorld(BEVDepth4D):
     def __init__(self, 
                 fut_ts=6,
                 fut_mode=6, 
+                use_rcsample=False,
                 **kwargs):
         super(ResWorld, self).__init__(**kwargs)
         self.fut_ts = fut_ts
         self.fut_mode = fut_mode
+        # Online (same-source) OSZ: use the model's own RCSample depth to
+        # compute the occlusion mask in the training/inference loop instead
+        # of loading precomputed {token}.npz masks. Orthogonal to use_osz:
+        #   use_osz=False                 -> no mask (baseline)
+        #   use_osz=True  + False (this)  -> offline npz masks
+        #   use_osz=True  + True  (this)  -> online RCSample masks
+        self.use_rcsample = use_rcsample
+        self._osz_bin_center = None
         self.planning_metric = None
+
+    def build_osz_mask_online(self, depth, img_inputs, lidar_depth=None):
+        """Compute the OSZ mask from the model's own RCSample depth.
+
+        ``depth`` is the key-frame depth distribution from the view
+        transformer ((B*N, D, H, W) softmax). The mask is grid-aligned with
+        the BEV feature map (200x200, see OSZ/config.py) and channel-ordered
+        like the offline npz: (osz_eye, osz_ground, semi). It is detached
+        downstream (discrete geometry) and used as a conditioning input.
+        """
+        from OSZ.modules.torch_pipeline import build_osz_mask_online as _build
+        if self._osz_bin_center is None:
+            depth_cfg = self.img_view_transformer.grid_config['depth']
+            d = torch.arange(*depth_cfg, dtype=torch.float32,
+                             device=depth.device)
+            self._osz_bin_center = d + 0.5 * float(depth_cfg[2])
+        imgs, sensor2keyegos, ego2globals, intrins, post_rots, post_trans, \
+            bda, _ = self.prepare_inputs(img_inputs)
+        return _build(
+            depth, self._osz_bin_center,
+            intrins[0], post_rots[0], post_trans[0], sensor2keyegos[0],
+            device=depth.device,
+            lidar_depth=lidar_depth,
+        )
 
     def extract_img_feat(self,
                          img,
@@ -110,6 +143,13 @@ class ResWorld(BEVDepth4D):
             points, img=img_inputs, img_metas=img_metas, **kwargs)
         loss_depth = self.img_view_transformer.get_depth_loss(gt_depth, depth)
         losses = dict(loss_depth=loss_depth)
+        if self.use_rcsample:
+            # Online (same-source) OSZ: mask from the model's own depth.
+            # Overrides any dataset-loaded osz_mask (offline npz path); the
+            # discrete geometry detaches it, so it conditions like GT masks.
+            # No lidar_depth on purpose: training and test masks stay
+            # symmetric (both pure model depth).
+            kwargs['osz_mask'] = self.build_osz_mask_online(depth, img_inputs)
         bev_inputs = [img_feats[0], kwargs['can_bus']]
         losses_pts = self.forward_pts_train(bev_inputs, gt_bboxes_3d, gt_labels_3d,
                                             map_gt_bboxes_3d, map_gt_labels_3d, img_metas,
@@ -212,7 +252,12 @@ class ResWorld(BEVDepth4D):
         **kwargs
     ):
         """Test function without augmentaiton."""
-        img_feats, _, _ = self.extract_feat(points, img=img_inputs, img_metas=img_metas, **kwargs)
+        img_feats, _, depth = self.extract_feat(
+            points, img=img_inputs, img_metas=img_metas, **kwargs)
+        if self.use_rcsample and depth is not None:
+            # Online (same-source) mask at test time too (deployment form);
+            # overrides the offline osz_mask passed by forward_test.
+            osz_mask = self.build_osz_mask_online(depth, img_inputs)
         bbox_list = [dict() for i in range(len(img_metas))]
         bev_inputs = [img_feats[0], kwargs['can_bus']]
         bbox_pts, metric_dict = self.simple_test_pts(

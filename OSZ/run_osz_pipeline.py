@@ -26,9 +26,6 @@ Single sample by token::
     python run_osz_pipeline.py \\
         --dataroot /data/jhc --sample_token <TOKEN>
 
-Synthetic mock (no nuScenes needed)::
-
-    python run_osz_pipeline.py --mock --outdir ./osz_output
 """
 from __future__ import annotations
 
@@ -48,7 +45,6 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from OSZ import config as cfg
-from OSZ.utils.geometry import bev_grid_shape
 from OSZ.utils.nuscenes_loader import NuScenesOSZLoader
 from OSZ.modules.depth_estimator import DepthEstimator, MockDepthEstimator
 from OSZ.modules.ray_casting import RayCaster3D, compute_osz_height_aware_from_cameras
@@ -63,14 +59,11 @@ from OSZ.visualize.visualize_nuscenes_sample import (
 )
 
 
-def get_estimator(mock_only: bool = False) -> DepthEstimator | MockDepthEstimator:
-    """Create a depth estimator, falling back to mock if loading fails.
+def get_estimator() -> DepthEstimator | MockDepthEstimator:
+    """Create the default depth estimator (MiDaS v2.1 Small).
 
-    Parameters
-    ----------
-    mock_only : bool, optional
-        If True, return a mock estimator without attempting to load the real
-        depth model. The default is False.
+    Falls back to :class:`MockDepthEstimator` (LiDAR densified depth)
+    only when the MiDaS model/repo cannot be loaded.
 
     Returns
     -------
@@ -81,9 +74,6 @@ def get_estimator(mock_only: bool = False) -> DepthEstimator | MockDepthEstimato
     -----
     Prints a warning to stdout when falling back to the mock estimator.
     """
-    if mock_only:
-        print("[INFO] Using MockDepthEstimator (--mock).")
-        return MockDepthEstimator()
     try:
         est = DepthEstimator()
         est._load()
@@ -609,8 +599,6 @@ def build_args() -> argparse.ArgumentParser:
                         help="nuScenes dataset version.")
     parser.add_argument("--sample_token", type=str, default=None,
                         help="Process a single sample by token.")
-    parser.add_argument("--mock", action="store_true",
-                        help="Use synthetic mock data (no nuScenes needed).")
     parser.add_argument("--outdir", type=str, default="./osz_output",
                         help="Output directory for PNG and CSV files.")
     parser.add_argument("--observer_height", type=float, default=cfg.OBSERVER_HEIGHT_M,
@@ -634,8 +622,8 @@ def main() -> None:
 
     Notes
     -----
-    Parses command-line arguments, loads nuScenes data (or mock data),
-    optionally builds a drivable-area mask, runs :func:`visualize_height_aware_osz`
+    Parses command-line arguments, loads nuScenes data, optionally builds
+    a drivable-area mask, runs :func:`visualize_height_aware_osz`
     for each selected sample, writes per-frame PNGs, and exports a summary CSV.
     """
     parser = build_args()
@@ -647,8 +635,6 @@ def main() -> None:
         max_samples=args.max_samples,
         n_sweeps=args.n_sweeps,
     )
-    if args.mock:
-        loader._use_mock = True
 
     suffix = f"_sweeps{args.n_sweeps}"
     if args.simulate_dropout > 0:
@@ -658,7 +644,7 @@ def main() -> None:
     if args.use_drivable:
         suffix += "_drivable"
 
-    estimator = get_estimator(mock_only=args.mock)
+    estimator = get_estimator()
     all_stats = []
 
     bev_range = cfg.BEV_RANGE_M
@@ -674,14 +660,9 @@ def main() -> None:
 
         drivable_mask = None
         if args.use_drivable:
-            if args.mock:
-                nx, ny = bev_grid_shape(bev_range)
-                drivable_mask = np.ones((nx, ny), dtype=bool)
-                print("[INFO] mock mode: drivable mask is all-True.")
-            else:
-                drivable_mask = build_drivable_mask(
-                    loader.nusc, token, bev_range
-                )
+            drivable_mask = build_drivable_mask(
+                loader.nusc, token, bev_range
+            )
 
         save_path = Path(args.outdir) / f"osz_{token}{suffix}.png"
         stats = visualize_height_aware_osz(
@@ -695,7 +676,7 @@ def main() -> None:
         )
 
         # 6-camera surround view (reuses visualize_nuscenes_sample helpers).
-        if not args.mock and hasattr(loader, "nusc"):
+        if hasattr(loader, "nusc"):
             try:
                 cam_save = Path(args.outdir) / f"cameras_{token}{suffix}.png"
                 cam_images = get_camera_images(loader.nusc, token)
@@ -703,8 +684,8 @@ def main() -> None:
             except Exception as e:
                 print(f"[WARN] camera panel viz failed: {e}")
 
-        # GT overlay: generate when drivable mask is available and not mock.
-        if drivable_mask is not None and not args.mock and hasattr(loader, "nusc"):
+        # GT overlay: generate when drivable mask is available.
+        if drivable_mask is not None and hasattr(loader, "nusc"):
             try:
                 gt_save_path = Path(args.outdir) / f"gt_osz_{token}{suffix}.png"
                 fig_gt = plot_gt_osz(

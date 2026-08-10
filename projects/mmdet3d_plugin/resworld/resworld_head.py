@@ -121,6 +121,7 @@ class ResWorldHead(BaseModule):
                  loss_plan_reg=dict(type='L1Loss', loss_weight=0.25),
                  ego_lcf_feat_idx=None,
                  valid_fut_ts=6,
+                 use_osz=False,
                  **kwargs):
         super(ResWorldHead, self).__init__()
         self.bev_h = bev_h
@@ -144,6 +145,10 @@ class ResWorldHead(BaseModule):
         self.grid_max = torch.tensor([grid_config['x'][1], grid_config['y'][1]])
         self.grid_size = torch.tensor([grid_config['x'][2], grid_config['y'][2]])
 
+        # Stage-2 OSZ switch. When False the occlusion fusion module is NOT
+        # created at all: strictly baseline (zero extra params, and no
+        # DDP 'unused parameter' failure under find_unused_parameters=False).
+        self.use_osz = use_osz
         self._init_layers()
         self.loss_plan_reg = build_loss(loss_plan_reg)
         self.loss_plan_reg_init = build_loss(loss_plan_reg)
@@ -170,7 +175,8 @@ class ResWorldHead(BaseModule):
         self.canbus_se = SELayerMLP(self.embed_dims)
         self.bev_fusion_conv = ConvModule(self.in_channels * self.num_frames, self.in_channels, 
                                           kernel_size=3, padding=1)
-        self.osz_fusion = OcclusionAwareFusion(self.in_channels)
+        if self.use_osz:
+            self.osz_fusion = OcclusionAwareFusion(self.in_channels)
 
         self.way_point = nn.Embedding(self.ego_fut_mode*self.fut_ts, self.embed_dims * 2)
         self.tokenlearner = TokenLearner(self.num_scenes, self.embed_dims * 2)
@@ -223,7 +229,7 @@ class ResWorldHead(BaseModule):
         bev_embed_single = bev_embed.clone()
         bev_embed = bev_embed.permute(0, 2, 1).view(self.num_frames, bs, c, h, w).permute(1, 0, 2, 3, 4)
         bev_embed = self.bev_fusion_conv(bev_embed.reshape(bs, self.num_frames * c, h, w))
-        if osz_mask is not None:
+        if self.use_osz and osz_mask is not None:
             # Stage-2 occlusion-aware injection (OARWM). Mask channels are
             # (osz_eye, osz_ground, semi), grid-aligned with the BEV feature
             # map (200x200, see OSZ/config.py); all-zeros = identity.

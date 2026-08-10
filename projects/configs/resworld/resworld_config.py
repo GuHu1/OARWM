@@ -4,7 +4,26 @@ _base_ = [
 ]
 
 # --- Stage-2 OSZ switch ---
+# True  = inject OSZ occlusion masks (Stage 2, OARWM).
+# False = strict baseline / "w/o explicit occlusion mask" ablation (5.2-1):
+#         osz_mask is neither loaded nor collected; the model's occlusion
+#         fusion branch is skipped entirely (zero overhead, baseline-equal).
+# One switch per stage; later stages (3+) get their own flags.
 use_osz = True
+
+# --- OSZ mask source ---
+# False = offline masks: precomputed {token}.npz (MiDaS/LiDAR depth) are
+#         loaded by the dataset pipeline (use_osz must be True to inject).
+# True  = online (same-source) masks: the ResWorld model's own RCSample
+#         depth produces the mask inside the training/inference loop
+#         (depth is already computed by the view transformer; the GPU OSZ
+#         geometry adds tens of ms/step). Orthogonal to use_osz:
+#           use_osz=False             -> no mask at all (baseline)
+#           use_osz=True  + False     -> offline npz masks
+#           use_osz=True  + True      -> online RCSample masks
+#         With True, set use_osz=False to skip npz IO (masks are computed,
+#         not loaded).
+use_rcsample = False
 
 #
 plugin = True
@@ -79,6 +98,7 @@ model = dict(
     type='ResWorld',
     align_after_view_transfromation=False,
     num_adj=len(range(*multi_adj_frame_id_cfg)),
+    use_rcsample=use_rcsample,
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -129,6 +149,7 @@ model = dict(
         num_reg_fcs=2,
         ego_lcf_feat_idx=None,
         valid_fut_ts=6,
+        use_osz=use_osz,
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,
