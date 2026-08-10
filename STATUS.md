@@ -55,6 +55,7 @@ for i in $(seq 0 7); do
 done
 # 4) 训练/评估
 bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
+nohup bash -c "CUDA_VISIBLE_DEVICES=4,5,6,7 bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4" > /data2/jhc/OARWM/work_dirs/train.log 2>&1 &
 ```
 
 ### 2.3 验证状态说明
