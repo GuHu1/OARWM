@@ -55,6 +55,10 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
         *args,
         **kwargs
     ):
+        # Stage-2 OSZ switch: config must opt in explicitly (`use_osz=True`).
+        # When off, `osz_mask` is not produced at all — the model receives
+        # None and the occlusion fusion branch is skipped (strict baseline).
+        self.use_osz = kwargs.pop('use_osz', False)
         self.osz_dir = kwargs.pop('osz_dir', None)
         super().__init__(*args, **kwargs)
         self.multi_adj_frame_id_cfg = multi_adj_frame_id_cfg
@@ -102,8 +106,12 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
             ego_fut_masks=info['gt_ego_fut_masks'],
             ego_fut_cmd=info['gt_ego_fut_cmd'],
             ego_lcf_feat=info['gt_ego_lcf_feat'],
-            osz_mask=_load_osz_mask(self.osz_dir, info['token']),
         )
+        if self.use_osz:
+            # Stage-2 OSZ masks (see OSZ/export_osz_dataset.py). Missing npz
+            # falls back to all-zeros (= identity for the fusion).
+            input_dict['osz_mask'] = _load_osz_mask(
+                self.osz_dir, info['token'])
         if 'occ_path' in info:
             input_dict['occ_gt_path'] = info['occ_path']
         # lidar to ego transform

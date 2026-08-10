@@ -17,6 +17,7 @@
 | **MiDaS v2.1 Small 深度估计** | `depth_estimator.py` / `config.py` | 默认深度模型改为 MiDaS v2.1 Small（MiDaSNet-small / EfficientNet-Lite3，torch 1.9.1 原生可跑、无需 timm）：本地权重 `OSZ/weights/midas_v21_small_256.pt` + 本地 repo `OSZ/third_party/MiDaS`（`torch.hub source='local'`，入口 `MiDaS_small` + 官方 `small_transform`，已核对上游 hubconf），**运行期零网络**；逆深度自动走 `align_to_lidar` inverse 分支；缺失回退 `MockDepthEstimator` |
 | **OSZ 批量导出** | `OSZ/export_osz_dataset.py`（新增） | 逐帧导出 `{token}.npz`（`bev_height / osz_ground / osz_eye / semi / drivable_mask`，200×200）；支持 `--num_workers` 进程池、`--shard/--num_shards` 外壳并行、`--overwrite` 断点续跑 |
 | **ResWorld Stage 2 接入** | `nuscenes_resworld_dataset.py` / `resworld_config.py` / `resworld_head.py` / `resworld.py` | 数据管线按 token 加载 osz npz（`lru_cache`，缺失全零=全可见）；`CustomCollect3D` keys 加 `osz_mask`；head 新增 `OcclusionAwareFusion`：1×1 Conv 从 `(osz_eye, osz_ground, semi)` 生成可学习嵌入 `E_occ`，`B̃ = B⊙(1-M) + E_occ⊙M`，注入点在 `bev_fusion_conv` 之后、TokenLearner 之前；训练/测试全链路传递 `osz_mask`（测试路径 `kwargs.pop` 防重复关键字 TypeError + `[:1]` 保留 batch 维） |
+| **Stage 2 开关化（use_osz）** | `nuscenes_resworld_dataset.py` / `resworld_config.py` | 顶层 `use_osz` 总开关（一个 Stage 一个开关）：`True` 注入掩码（默认）；`False` = 严格基线 / 消融 5.2-1——dataset 不加载 npz、`CustomCollect3D` keys 条件化移除 `osz_mask`（mmcv collate 对 None 不兼容）、模型融合分支整体跳过（`osz_mask=None` 全链路安全，零开销）。模型层零改动 |
 | **审查修复（3 轮 review）** | `resworld.py` / `nuscenes_resworld_dataset.py` / `depth_estimator.py` / `ray_casting.py` | 修复：①`simple_test`→`simple_test_pts` 断链（评估时注入静默失效）；②`osz_mask=kwargs.get()+**kwargs` 重复关键字 TypeError → `kwargs.pop`+显式传参；③`osz_mask[0]` 3D 与 head 4D 不匹配 → `[:1]` 保留 batch 维；④lru_cache 共享数组 → 三路径 `writeable=False` + `(3,200,200)` 形状断言；⑤`align_to_lidar` linear 模式对称 `shift>10` 回退（防幻影墙）；⑥MiDaS 加载 `model.` 前缀剥离；⑦`z_res` 收敛到 `config.py::Z_RES_M` 单一来源；⑧重复/死导入清理 |
 | **测试** | `tests/test_osz_grid.py` / `test_osz_export.py` / `test_resworld_osz.py` / `test_docs_consistency.py`（新增） | **23 项 pytest 全部通过**（本机）：网格 200×200、npz 导出/加载、`OcclusionAwareFusion` 数学性质、接线回归守卫、`_load_osz_mask` 行为、`align_to_lidar` 回退、文档-代码一致性 |
 
@@ -114,8 +115,8 @@ bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
 
 ## 5. 已知限制
 
-- **深度范围**：MiDaS 输出逆深度经 LiDAR 对齐后为 metric 深度，但无 LiDAR 区域仅相对深度（不可反投影）——与旧 DA V2 路线一致，OSZ 依赖 LiDAR 对齐。
+- **深度范围**：MiDaS 输出逆深度经 LiDAR 对齐后为 metric 深度，但无 LiDAR 区域仅相对深度
 - **OSZ 网格前方仅 ±15 m**（跟随 ResWorld `grid_config`）：>15 m 前方遮挡物不在世界模型 BEV 内；若需更远，需同时改 ResWorld `grid_config` 与 `OSZ/config.py`（单一来源同步）。
-- **各向异性近似**：射线投射在 cell 空间为直线，物理空间角度略拉伸（0.15 vs 0.3 m/cell），OSZ 几何为近似（设计可接受）。
+- **各向异性近似**：射线投射在 cell 空间为直线，物理空间角度略拉伸（0.15 vs 0.3 m/cell），OSZ 几何为近似。
 - **drivable 膨胀**：按较粗轴（0.3 m）迭代膨胀，x 方向实际膨胀 0.75 m（1.5 m 的设定值折半），偏保守方向安全。
 - `OSZ/README.md`（原 `Height_aware_bev_osz.md`，2026-08 重写为"参数/安装/运行"手册）与 `OSZ/PROJECT_STATUS.md` 为历史/维护文档；±50 m 网格、`common/`、`pa_osz_mining` 缓存等旧描述不再适用，以 `OSZ/config.py` 与仓库根 `STATUS.md` 为准。

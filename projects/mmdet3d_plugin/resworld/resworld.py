@@ -165,10 +165,11 @@ class ResWorld(BEVDepth4D):
         # img_metas[0][0]['can_bus'][-1] = 0
         # img_metas[0][0]['can_bus'][:3] = 0
         kwargs['can_bus'] = kwargs['can_bus'][0]
-        # Pop osz_mask before **kwargs expansion: test data always carries the
-        # key (Collect3D), so passing it both explicitly and via **kwargs
-        # would raise TypeError. Keep the batch dim (1, 3, H, W) — the head's
-        # osz_fusion indexes mask[:, :1] and broadcasts against (bs, C, H, W).
+        # Pop osz_mask before **kwargs expansion: the key is carried by the
+        # test data when use_osz=True (Collect3D), so passing it both
+        # explicitly and via **kwargs would raise TypeError. Keep the batch
+        # dim (1, 3, H, W) — the head's osz_fusion indexes mask[:, :1] and
+        # broadcasts against (bs, C, H, W).
         osz_mask = kwargs.pop('osz_mask', None)
         if osz_mask is not None:
             osz_mask = osz_mask[:1]

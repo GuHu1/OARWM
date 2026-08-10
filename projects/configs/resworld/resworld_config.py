@@ -68,6 +68,14 @@ bev_w_ = 100
 queue_length = 0 # each sequence contains `queue_length` frames.
 total_epochs = 12
 
+# --- Stage-2 OSZ switch ---
+# True  = inject OSZ occlusion masks (Stage 2, OARWM).
+# False = strict baseline / "w/o explicit occlusion mask" ablation (5.2-1):
+#         osz_mask is neither loaded nor collected; the model's occlusion
+#         fusion branch is skipped entirely (zero overhead, baseline-equal).
+# One switch per stage; later stages (3+) get their own flags.
+use_osz = True
+
 multi_adj_frame_id_cfg = (1, 1+2, 1)
 numC_Trans=80
 
@@ -221,8 +229,8 @@ train_pipeline = [
     dict(type='CustomDefaultFormatBundle3D', class_names=class_names, with_ego=True),
     dict(type='CustomCollect3D',\
          keys=['gt_bboxes_3d', 'gt_labels_3d', 'img_inputs', 'ego_his_trajs', 'gt_depth', 'can_bus',
-               'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels',
-               'osz_mask'])
+               'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels']
+         + (['osz_mask'] if use_osz else []))
 ]
 
 test_pipeline = [
@@ -247,7 +255,8 @@ test_pipeline = [
             dict(type='CustomCollect3D',\
                  keys=['img_inputs', 'gt_bboxes_3d', 'gt_labels_3d', 'fut_valid_flag', 'can_bus',
                        'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd',
-                       'ego_lcf_feat', 'gt_attr_labels', 'osz_mask'])])
+                       'ego_lcf_feat', 'gt_attr_labels']
+                 + (['osz_mask'] if use_osz else []))])
 ]
 
 data = dict(
@@ -266,9 +275,10 @@ data = dict(
         bev_size=(bev_h_, bev_w_),
         pc_range=point_cloud_range,
         queue_length=queue_length,
-        # Precomputed OSZ masks (see OSZ/export_osz_dataset.py). Empty/missing
-        # masks fall back to all-zeros = baseline-equivalent.
+        # Precomputed OSZ masks (see OSZ/export_osz_dataset.py), used only when
+        # use_osz=True. Empty/missing masks fall back to all-zeros = identity.
         osz_dir='data/osz/',
+        use_osz=use_osz,
         # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
         # and box_type_3d='Depth' in sunrgbd and scannet dataset.
         box_type_3d='LiDAR',
@@ -281,6 +291,7 @@ data = dict(
              pipeline=test_pipeline,  bev_size=(bev_h_, bev_w_),
              classes=class_names, modality=input_modality, samples_per_gpu=1,
              osz_dir='data/osz/',
+             use_osz=use_osz,
              map_classes=map_classes,
              map_ann_file=data_root + 'nuscenes_map_anns_val.json',
              map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_gt_line,
@@ -295,6 +306,7 @@ data = dict(
               pipeline=test_pipeline, bev_size=(bev_h_, bev_w_),
               classes=class_names, modality=input_modality, samples_per_gpu=1,
               osz_dir='data/osz/',
+              use_osz=use_osz,
               map_classes=map_classes,
               map_ann_file=data_root + 'nuscenes_map_anns_val.json',
               map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_gt_line,
