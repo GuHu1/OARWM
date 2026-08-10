@@ -2,6 +2,10 @@ _base_ = [
     '../datasets/custom_nus-3d.py',
     '../_base_/default_runtime.py'
 ]
+
+# --- Stage-2 OSZ switch ---
+use_osz = True
+
 #
 plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
@@ -67,14 +71,6 @@ bev_h_ = 100
 bev_w_ = 100
 queue_length = 0 # each sequence contains `queue_length` frames.
 total_epochs = 12
-
-# --- Stage-2 OSZ switch ---
-# True  = inject OSZ occlusion masks (Stage 2, OARWM).
-# False = strict baseline / "w/o explicit occlusion mask" ablation (5.2-1):
-#         osz_mask is neither loaded nor collected; the model's occlusion
-#         fusion branch is skipped entirely (zero overhead, baseline-equal).
-# One switch per stage; later stages (3+) get their own flags.
-use_osz = True
 
 multi_adj_frame_id_cfg = (1, 1+2, 1)
 numC_Trans=80

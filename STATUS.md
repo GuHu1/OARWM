@@ -119,4 +119,3 @@ bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
 - **OSZ 网格前方仅 ±15 m**（跟随 ResWorld `grid_config`）：>15 m 前方遮挡物不在世界模型 BEV 内；若需更远，需同时改 ResWorld `grid_config` 与 `OSZ/config.py`（单一来源同步）。
 - **各向异性近似**：射线投射在 cell 空间为直线，物理空间角度略拉伸（0.15 vs 0.3 m/cell），OSZ 几何为近似。
 - **drivable 膨胀**：按较粗轴（0.3 m）迭代膨胀，x 方向实际膨胀 0.75 m（1.5 m 的设定值折半），偏保守方向安全。
-- `OSZ/README.md`（原 `Height_aware_bev_osz.md`，2026-08 重写为"参数/安装/运行"手册）与 `OSZ/PROJECT_STATUS.md` 为历史/维护文档；±50 m 网格、`common/`、`pa_osz_mining` 缓存等旧描述不再适用，以 `OSZ/config.py` 与仓库根 `STATUS.md` 为准。
