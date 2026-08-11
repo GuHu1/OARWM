@@ -99,6 +99,79 @@ class OcclusionAwareFusion(nn.Module):
         e_occ = self.osz_embed(mask)   # (bs, C, h, w)
         return bev * (1 - m) + e_occ * m
 
+
+class OcclusionMHSTHead(nn.Module):
+    """Stage-3 multi-hypothesis stochastic transition head (OARWM, 主方案 B).
+
+    Grafted AFTER the ResWorld deterministic residual path (right after
+    ``pred_bev = tokenfuser(...) + bev_navi_embed``): inside occluded cells
+    (mask channel 0 = osz_eye) the single deterministic guess is replaced
+    by a K-hypothesis mixture; visible cells stay untouched::
+
+        B_hat(x,y) = pred_bev(x,y)                              visible
+                   = sum_k pi_k(x,y) * (pred_bev + dB^k)(x,y)   occluded
+
+    Components (design doc §3.3 / §3.5, main plan B):
+      * prior network g_prior: [pred_bev | mask] -> 1x1 conv -> 3x3 conv
+        (the 3x3 aggregates the occluded-boundary neighbourhood N(x,y))
+        -> K logits -> softmax = pi (B, K, H, W).
+      * K-hypothesis residuals (MoE-style): one shared backbone
+        (1x1 + 3x3 conv) then K independent expert 3x3 convs -> dB^k
+        (B, K, C, H, W). K=1 is the single-hypothesis ablation.
+      * uncertainty: sigma = softplus(s) + sigma_min (B, 1, H, W), kept
+        for the Stage-6 calibration losses; it does NOT alter the fused
+        output here (the mixture already is the expectation).
+
+    An all-zero mask makes the head the identity (fused == pred_bev), so
+    ``use_oarwm=False`` (or an empty mask) stays strictly baseline-exact.
+    """
+
+    def __init__(self, in_channels, k=3, sigma_min=0.1, mask_channels=3,
+                 hidden=128):
+        super(OcclusionMHSTHead, self).__init__()
+        self.k = k
+        self.sigma_min = sigma_min
+
+        # g_prior: mask + BEV context -> pi over K hypotheses.
+        self.prior = nn.Sequential(
+            nn.Conv2d(in_channels + mask_channels, hidden, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, k, kernel_size=1),
+        )
+        # Shared residual backbone, then one expert head per hypothesis.
+        self.backbone = nn.Sequential(
+            nn.Conv2d(in_channels, hidden, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.experts = nn.ModuleList([
+            nn.Conv2d(hidden, in_channels, kernel_size=3, padding=1)
+            for _ in range(k)
+        ])
+        self.sigma_net = nn.Conv2d(hidden, 1, kernel_size=1)
+
+    def forward(self, pred_bev, mask):
+        m = mask[:, :1]                       # strict occlusion = osz_eye
+        pi = self.prior(torch.cat([pred_bev, mask], dim=1))
+        pi = pi.softmax(dim=1)                # (B, K, H, W)
+
+        h = self.backbone(pred_bev)           # (B, hidden, H, W)
+        delta = torch.stack(
+            [expert(h) for expert in self.experts], dim=1)  # (B, K, C, H, W)
+
+        occ = pred_bev.unsqueeze(1) + delta   # (B, K, C, H, W)
+        patch = (occ * pi.unsqueeze(2)).sum(dim=1)          # (B, C, H, W)
+
+        sigma = F.softplus(self.sigma_net(h)) + self.sigma_min
+
+        fused = pred_bev * (1 - m) + patch * m
+        aux = {'pi': pi, 'sigma': sigma, 'delta': delta}
+        return fused, aux
+
+
 @HEADS.register_module()
 class ResWorldHead(BaseModule):
     def __init__(self,
@@ -124,6 +197,12 @@ class ResWorldHead(BaseModule):
                  # Injection gate: True iff any mask source is active
                  # (config: use_osz = use_osz_midas or use_osz_rcsample).
                  use_osz=False,
+                 # Stage-3 OARWM switch: multi-hypothesis transition head
+                 # (main plan B, see OARWM_ResWorld.md §3.5).
+                 use_oarwm=False,
+                 mhst_k=3,
+                 mhst_sigma_min=0.1,
+                 mhst_sigma_reg_weight=1e-4,
                  **kwargs):
         super(ResWorldHead, self).__init__()
         self.bev_h = bev_h
@@ -151,6 +230,13 @@ class ResWorldHead(BaseModule):
         # created at all: strictly baseline (zero extra params, and no
         # DDP 'unused parameter' failure under find_unused_parameters=False).
         self.use_osz = use_osz
+        # Stage-3 OARWM switch: same rationale — the MHST head is only
+        # created when active, so the strict baseline has zero extra params
+        # and no DDP unused-parameter failure.
+        self.use_oarwm = use_oarwm
+        self.mhst_k = mhst_k
+        self.mhst_sigma_min = mhst_sigma_min
+        self.mhst_sigma_reg_weight = mhst_sigma_reg_weight
         self._init_layers()
         self.loss_plan_reg = build_loss(loss_plan_reg)
         self.loss_plan_reg_init = build_loss(loss_plan_reg)
@@ -179,6 +265,10 @@ class ResWorldHead(BaseModule):
                                           kernel_size=3, padding=1)
         if self.use_osz:
             self.osz_fusion = OcclusionAwareFusion(self.in_channels)
+        if self.use_oarwm:
+            self.mhst = OcclusionMHSTHead(
+                self.in_channels, k=self.mhst_k,
+                sigma_min=self.mhst_sigma_min)
 
         self.way_point = nn.Embedding(self.ego_fut_mode*self.fut_ts, self.embed_dims * 2)
         self.tokenlearner = TokenLearner(self.num_scenes, self.embed_dims * 2)
@@ -322,6 +412,25 @@ class ResWorldHead(BaseModule):
         
         pred_bev = self.tokenfuser(res_latent_query.permute(1, 0, 2), bev_navi_embed) + bev_navi_embed
 
+        mhst_aux = None
+        if self.use_oarwm and osz_mask is not None:
+            # Stage-3 MHST: K-hypothesis mixture inside occluded cells.
+            # The mask is aligned to the fused BEV resolution and dtype HERE
+            # (independent of the Stage-2 branch, which may not run), so the
+            # head never sees a resolution/dtype mismatch.
+            mhst_mask = osz_mask.to(device=device, dtype=pred_bev.dtype)
+            if mhst_mask.shape[-2:] != pred_bev.shape[-2:]:
+                mhst_mask = F.interpolate(
+                    mhst_mask, size=pred_bev.shape[-2:], mode="nearest")
+            pred_bev, mhst_aux = self.mhst(pred_bev, mhst_mask)
+        elif self.use_oarwm:
+            # Fail loudly: MHST without a mask source would silently produce
+            # an identity (and leave all its params unused under DDP). The
+            # config asserts use_oarwm -> use_osz, so this is a logic error.
+            raise ValueError(
+                "use_oarwm=True but osz_mask is None — MHST requires a "
+                "mask source (use_osz_midas or use_osz_rcsample).")
+
         way_point = self.col_attn(
                 query=way_point,
                 key=pred_bev.permute(1, 0, 2),
@@ -351,6 +460,10 @@ class ResWorldHead(BaseModule):
             # 'ego_fut_preds': init_ego_trajs,
             'init_ego_fut_preds': init_ego_trajs,
         }
+        if mhst_aux is not None:
+            # Stage-3 aux outputs (pi / sigma / delta), consumed by the
+            # Stage-6 losses (L_occ_halluc / L_div / L_uncertainty).
+            outs['mhst'] = mhst_aux
 
         return outs
     
@@ -396,6 +509,17 @@ class ResWorldHead(BaseModule):
       
         loss_dict['loss_plan_reg'] = loss_plan_l1
         loss_dict['loss_plan_reg_init'] = loss_plan_l1_init
+
+        # Stage-3 placeholder: keep sigma_net in the graph until the Stage-6
+        # calibration loss (L_uncertainty) replaces it. Without any term the
+        # sigma_net parameters never receive grad -> DDP unused-parameter
+        # failure under find_unused_parameters=False. Weight is tiny so it
+        # does not perturb the planning loss.
+        mhst = preds_dicts.get('mhst')
+        if mhst is not None:
+            sigma = mhst['sigma']
+            loss_dict['loss_mhst_sigma'] = (
+                sigma.mean() * self.mhst_sigma_reg_weight)
 
         return loss_dict
 

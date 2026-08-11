@@ -143,7 +143,7 @@ ResWorld 的残差世界模型通过时序 BEV 特征预测未来残差：
 $$\hat{B}_{t+1} = B_t + \Delta B_{t+1}, \quad \Delta B_{t+1} = f_{RWM}(\{B_{t-2}^{\text{align}}, B_{t-1}^{\text{align}}, B_t\})$$
 我们将其扩展为**遮挡感知多假设残差世界模型（OA-RWM）**。
 
-**与 Basework 实现的对接（实现载体决策）**: ResWorld 的残差并非逐 BEV 位置预测——`resworld_head.py` 先将 BEV 特征经 TokenLearner 压缩为 latent tokens，在 **latent 空间**做相邻帧差分（`res_latent_query = bev_embed[:-1] - bev_embed[1:]`），经 latent decoder 后由 tokenfuser 融合回 BEV（`pred_bev = tokenfuser(...) + bev_navi_embed`，残差连接）。因此 OA-RWM 的 MHST 存在两种嫁接方式：**主方案**——在 `pred_bev` 输出后按掩码加门控多假设残差头（详细实现蓝图见 3.5，未来实现）；**备选方案**——在 latent token 分支做遮挡相关 token 的 K 假设转移（概念设计，暂不实现，见 3.6）。可见/遮挡位置路由均以 Stage 2 的 200×200 掩码为准；3.1-3.3 的逐位置公式为概念定义，实现时按主方案的门控残差头对接。
+**与 Basework 实现的对接（实现载体决策）**: ResWorld 的残差并非逐 BEV 位置预测——`resworld_head.py` 先将 BEV 特征经 TokenLearner 压缩为 latent tokens，在 **latent 空间**做相邻帧差分（`res_latent_query = bev_embed[:-1] - bev_embed[1:]`），经 latent decoder 后由 tokenfuser 融合回 BEV（`pred_bev = tokenfuser(...) + bev_navi_embed`，残差连接）。因此 OA-RWM 的 MHST 存在两种嫁接方式：**主方案**——在 `pred_bev` 输出后按掩码加门控多假设残差头（已实现，见 3.5）；**备选方案**——在 latent token 分支做遮挡相关 token 的 K 假设转移（概念设计，暂不实现，见 3.6）。可见/遮挡位置路由均以 Stage 2 的 200×200 掩码为准；3.1-3.3 的逐位置公式为概念定义，实现时按主方案的门控残差头对接。
 
 #### 3.1 BEV 位置分类与路由
 
@@ -205,7 +205,7 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 
 ---
 
-#### 3.5 主实现方案（★ 未来实现）：`pred_bev` 后门控多假设残差头 MHST-Head
+#### 3.5 主实现方案（★ 已实现 2026-08）：`pred_bev` 后门控多假设残差头 MHST-Head
 
 **决策**：MHST 落点选在 ResWorld 残差链路的**输出端**（`pred_bev` 之后），而非改造其内部 latent 机制。理由：
 
@@ -238,20 +238,23 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 
 **训练损失接口（Stage 6 预留，本阶段只搭骨架）**：
 
-- `L_occ_halluc`（遮挡暴露自监督）：需加载相邻帧掩码 `osz_mask_{t+Δt}`（按相邻 token 复用 `_load_osz_mask`）与相邻帧真值 BEV；骨架先让 MHST-Head 输出 `pred_bev`、`π`、`Σ`，损失函数体留空待 Stage 6 接入；
-- `L_div`（多样性，防坍缩）：`-Σ_{k1≠k2} KL(p^(k1)‖p^(k2))` 或等价假设残差两两距离项；
-- `L_uncertainty`（校准）：`|Σ - ‖e‖²|`，`e` 为遮挡区预测误差。
+- 已实现：`OcclusionMHSTHead` 输出 `pred_bev`（融合后）、`π`、`Σ`、`ΔB^(k)`（存 `outs['mhst']`）；`head.loss` 加极小权重占位正则 `loss_mhst_sigma = Σ.mean() × 1e-4`——作用仅是让 `sigma_net` 参与梯度（否则 `find_unused_parameters=False` 下 DDP 报未使用参数），Stage 6 由 `L_uncertainty` 替换；
+- `L_occ_halluc`（遮挡暴露自监督）：需加载相邻帧掩码 `osz_mask_{t+Δt}`（按相邻 token 复用 `_load_osz_mask`）与相邻帧真值 BEV；待 Stage 6 接入；
+- `L_div`（多样性，防坍缩）：`-Σ_{k1≠k2} KL(p^(k1)‖p^(k2))` 或等价假设残差两两距离项，待 Stage 6 接入；
+- `L_uncertainty`（校准）：`|Σ - ‖e‖²|`，`e` 为遮挡区预测误差，待 Stage 6 接入；
 - 以上损失均以掩码选择遮挡区位置计算，权重系数进 `resworld_config.py`。
 
 **配置开关**（对齐现有 `use_osz_midas` / `use_osz_rcsample` 风格，一个 Stage 一组开关）：
 
 ```python
-use_mhst = True       # Stage 3 总开关；False = 跳过 MHST-Head，pred_bev 直通（严格基线）
-mhst_k = 3            # 假设数 K（消融 5.2-2：1/3/5/10）
-mhst_sigma_min = 0.1  # 遮挡区不确定性下限 Σ_min
+use_oarwm = True          # Stage 3 总开关；False = 不创建 MHST-Head，pred_bev 直通（严格基线，零开销）
+mhst_k = 3                # 假设数 K（消融 5.2-2：1/3/5/10；K=1 为单假设消融，仍有残差补丁）
+mhst_sigma_min = 0.1      # 遮挡区不确定性下限 Σ_min
+mhst_sigma_reg_weight = 1e-4  # sigma 占位正则权重（Stage 6 换 L_uncertainty）
+# use_oarwm=True 依赖掩码源：assert use_oarwm -> use_osz_midas or use_osz_rcsample
 ```
 
-**消融等价性**：`use_mhst=False`（或 `K=1` 且 Σ 固定）时 MHST-Head 输出恒等于 `pred_bev`，与基线**逐位一致**——这是相对方案 A 的显著优势（A 需额外确认路由机制关闭后是否严格复原）。
+**消融等价性**：`use_oarwm=False` 时 MHST-Head 不创建，`pred_bev` 直通，与基线**逐位一致**、零额外参数——这是相对方案 A 的显著优势（A 需额外确认路由机制关闭后是否严格复原）。注：`K=1` 是**单假设消融**（遮挡区仍有确定性残差补丁 `pred_bev + ΔB`），并非纯基线。
 
 **已知风险与应对**：
 

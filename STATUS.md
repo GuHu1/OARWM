@@ -25,6 +25,7 @@
 | **RCSample 深度估计器与训练管线严格对齐** | `rcsample_depth_estimator.py` | 图像 resize 改用 PIL 默认 BICUBIC（与 `loading.py::img_transform_core` 一致，原 BILINEAR 有亚像素偏差）；`_load()` 新增 config 断言（`input_size`/`resize_test=0`/`crop_h=(0,0)`），配置漂移时 fail loudly；复制的 `_make_mlp_input`/`_training_aug` 逻辑已逐项与 `rcsample.py::get_mlp_input`、`loading.py` 核对 |
 | **OSZ 几何 GPU 化（--backend torch）** | `torch_pipeline.py`（新增）/ `depth_estimator.py` / `rcsample_depth_estimator.py` / `export_osz_dataset.py` | torch 版反投影+BEV 高度图+高度感知射线，与 numpy 版同签名（`compute_osz_height_aware_from_cameras_torch`，输出 numpy）；`--backend {numpy,torch,auto}`（auto=有 GPU 用 torch）；estimator 新增 `infer_tensor`（RCSample 全 GPU、MiDaS 前向 GPU+对齐 CPU、LiDAR 直接取张量），深度与几何免逐帧 CPU 往返；**兼容服务器 torch 1.9.1**：无 `scatter_reduce_`，BEV 高度 max 聚合用「float64 编码 idx·BIG + cummax + 组末 scatter_」段式 max；`use_uncertainty=True` 的逆不确定性融合已实现（相机不确定性∝距离、LiDAR∝1/密度，`scatter_add_` 聚合，对拍一致）；对拍测试 `tests/test_torch_osz.py`（numpy vs torch 逐格 IoU/数值一致，本机 4 项通过） |
 | **训练在线生成 OSZ（use_osz_rcsample）** | `resworld.py` / `resworld_config.py` / `torch_pipeline.py::build_osz_mask_online` | 互斥双源开关之一 `use_osz_rcsample`：`True` 时 ResWorld 用自身 RCSample 深度（view transformer 已产出）在训练/推理循环内实时生成掩码（同源，掩码随模型感知演化）；`False` 走离线 npz（`use_osz_midas`）。关键几何修正：等效内参 `K_eff = A@intrins`（`A=[[R,t],[0,0,1]]`，`R`=post_rots 2×2、`t`=post_trans 前两维——裁剪平移必须在 `K_eff` 里）；`depth_scale` 约定（GT 深度加载时除以 `depth_scale`，`post_rot[2,2]=1/depth_scale`）需在反投影前乘回 `ds=1/post_rots[2,2]`，否则几何缩小 ±20%。训练/测试掩码对称（均不传 lidar_depth，纯模型深度）；掩码为 detach 条件输入（几何不可微）。4 项对拍全过（含 `depth_scale≠1` 严格用例） |
+| **Stage 3 MHST-Head（主方案 B，已实现）** | `resworld_head.py` / `resworld_config.py` | 新增 `OcclusionMHSTHead`（嫁接在 `pred_bev = tokenfuser(...)+bev_navi_embed` 之后、`col_attn` 之前）：先验网络 `[pred_bev|mask]→1×1→3×3(邻域)→K logits→softmax=π`、共享骨干 + K 个 expert 分支（ΔB^k）、`σ=softplus(s)+Σ_min`；门控合成 `fused = pred_bev·(1-M) + Σ_k π_k·(pred_bev+ΔB^k)·M`（M=osz_eye）；全零掩码=恒等、可见区零改动；`use_oarwm` 总开关（False 不创建模块=严格基线零开销，防 DDP 未使用参数），`mhst_k`（K=1 单假设消融）、`mhst_sigma_min`、`mhst_sigma_reg_weight=1e-4`（sigma 占位正则，Stage 6 换 `L_uncertainty`）；`outs['mhst']` 输出 π/Σ/ΔB 供 Stage 6 损失（L_occ_halluc/L_div/L_uncertainty）。本机数学性质自检 5 项全过（恒等/路由/pi 归一/σ 下限/K=1/全参数梯度） |
 
 ---
 
@@ -75,7 +76,7 @@ conda activate resworld
 bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
 ```
 
-- 输出 `work_dirs/resworld_config/`，EMA 权重 `epoch_12_ema.pth`。
+- 输出 `work_dirs/oa_resworld/`（`resworld_config.py` 内 `work_dir='work_dirs/oa_resworld'`，CLI `--work-dir` 可覆盖），EMA 权重 `epoch_12_ema.pth`。
 - 配置要点（`resworld_config.py`）：图像 256×704（源 900×1600）、6 相机、`num_frames=3`（`multi_adj_frame_id_cfg=(1, 1+2, 1)`）；BEV 网格 200×200 各向异性（x∈[-15,15]@0.15 m、y∈[-30,30]@0.3 m）；loss = depth + 检测 + 地图 + 规划（`loss_plan_reg=L1, w=10.0`）。
 - OSZ：`osz_dir='data/osz/'` 按 token 加载掩码（`OcclusionAwareFusion` 注入 `B̃=B⊙(1-M)+E_occ⊙M`）；未导出时全零回退 = 基线等价。
 
@@ -83,7 +84,7 @@ bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
 
 ```shell
 bash 
-nohup bash -c "CUDA_VISIBLE_DEVICES=4,5,6,7 tools/dist_test.sh projects/configs/resworld/resworld_config.py work_dirs/resworld_config/epoch_12_ema.pth 4 --eval bbox" > /data2/jhc/OARWM/work_dirs/eval.log 2>&1 &
+nohup bash -c "CUDA_VISIBLE_DEVICES=4,5,6,7 tools/dist_test.sh projects/configs/resworld/resworld_config.py work_dirs/oa_resworld/epoch_12_ema.pth 4 --eval bbox" > /data2/jhc/OARWM/work_dirs/eval.log 2>&1 &
 ```
 
 官方参考指标（README）：
@@ -117,7 +118,7 @@ python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
 # arm B: RCSample（需 ResWorld 训练完成后 + mmdet3d 环境）
 python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
     --version v1.0-trainval --outdir data/osz_rcsample --use_drivable \
-    --depth-source rcsample --rcsample-ckpt work_dirs/resworld_config/epoch_12_ema.pth
+    --depth-source rcsample --rcsample-ckpt work_dirs/oa_resworld/epoch_12_ema.pth
 
 # arm C: LiDAR 上界（LiDAR densified ≈ 真值，衡量深度误差造成的掩码损失）
 python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
@@ -135,14 +136,15 @@ python OSZ/export_osz_dataset.py --dataroot data/nuscenes \
 
 ## 4. 下一步改造路线（按设计文档 Stage 3 → 6）
 
-1. **Stage 3 遮挡区多假设随机残差转移（MHST）** —— 本次接入的核心接口已就位：
+1. **Stage 3 遮挡区多假设随机残差转移（MHST）—— 主方案 B 已实现（`use_oarwm` 开关）**：
    - 掩码已在 head 内可用（`osz_mask`，200×200，与 BEV 特征同格）→ 可见/遮挡位置路由的输入就绪；
-   - 注入点确定：`bev_fusion_conv` 之后（`resworld_head.py` forward）；
-   - **ResWorld 残差在 latent token 空间**（`res_latent_query = bev_embed[:-1] - bev_embed[1:]`，`resworld_head.py:227`）——MHST 应嫁接在 latent token 分支（遮挡相关 tokens 走 K 假设转移），或在 `pred_bev` 输出后按掩码加门控残差头（见设计文档 Stage 3"与 Basework 实现的对接"）。
+   - 注入点确定：`bev_fusion_conv` 之后（`resworld_head.py` forward，Stage 2）；`pred_bev` 之后（Stage 3，`OcclusionMHSTHead`）；
+   - **ResWorld 残差在 latent token 空间**（`res_latent_query = bev_embed[:-1] - bev_embed[1:]`，`resworld_head.py`）——备选方案 A（latent token 分支 K 假设转移）仍为概念设计（见设计文档 3.6）；
+   - 待办（Stage 6）：`L_occ_halluc`（遮挡暴露自监督，需时序相邻帧掩码）→ `L_div`（多样性，防假设坍缩）→ `L_uncertainty`（校准，替换现有 sigma 占位正则）；权重系数进 `resworld_config.py`。
 2. **Stage 4 时空风险场**：多假设 BEV 序列解码 + 概率聚合 + 风险放大（`α·M`）。
 3. **Stage 5 鲁棒规划**：Minimax 安全筛选 + CVaR 约束 + 信息增益奖励（`planner/` 与 `plan_loss.py` 改造）。
-4. **Stage 6 训练目标**：`L_occ_halluc`（遮挡暴露自监督，需时序相邻帧掩码）→ `L_div`（多样性）→ `L_uncertainty`（校准）→ `L_info`；权重系数进 `resworld_config.py`。
-5. **消融**：w/o 掩码注入（config 里 `osz_dir=''` 即等价基线）、K=1 vs K=3/5、Minimax/CVaR/信息增益开关。
+4. **Stage 6 训练目标**：`L_occ_halluc` → `L_div` → `L_uncertainty` → `L_info`；权重系数进 `resworld_config.py`。
+5. **消融**：w/o 掩码注入（`use_osz_midas=False` 且 `use_osz_rcsample=False` 即等价基线）、K=1 vs K=3/5/10（`mhst_k`）、Minimax/CVaR/信息增益开关。
 
 ---
 

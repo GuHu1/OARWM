@@ -16,8 +16,10 @@ backends on identical synthetic input and compares the outputs.
 
 Notes
 -----
-- ``use_uncertainty=True`` is not implemented yet: the torch path raises
-  ``NotImplementedError`` (the caller falls back to the numpy backend).
+- ``use_uncertainty=True`` is supported on the torch path: inverse-
+  uncertainty fusion is implemented (camera uncertainty ~ distance,
+  LiDAR ~ 1/density; ``scatter_add_`` aggregation), matching the numpy
+  backend cell-by-cell (see ``depth_maps_to_bev_height_uncertainty_torch``).
 - Depth sources go through an optional ``infer_tensor`` on the estimator
   (RCSample / MiDaS) so depth prediction stays on the device; the generic
   fallback converts the numpy ``infer`` result to a tensor.

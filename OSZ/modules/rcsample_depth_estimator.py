@@ -117,7 +117,7 @@ class RCSampleDepthEstimator:
             raise FileNotFoundError(
                 "RCSample depth source needs a trained ResWorld checkpoint. "
                 "Pass --rcsample-ckpt <path> (e.g. "
-                "work_dirs/resworld/epoch_12.pth)."
+                "work_dirs/oa_resworld/epoch_12_ema.pth)."
             )
         if not Path(self.config_path).exists():
             raise FileNotFoundError(

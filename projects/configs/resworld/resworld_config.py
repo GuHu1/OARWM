@@ -24,6 +24,19 @@ assert not (use_osz_midas and use_osz_rcsample), \
 # Injection gate for the head: True iff any mask source is active.
 use_osz = use_osz_midas or use_osz_rcsample
 
+# --- Stage-3 OARWM switch (multi-hypothesis stochastic transition, MHST) ---
+# True = graft the MHST head on pred_bev (main plan B, OARWM_ResWorld.md
+#        §3.5); False = strict baseline (head not even created).
+# MHST needs a mask to know where the occluded cells are, so it implies
+# a mask source: use_oarwm=True requires use_osz_midas or use_osz_rcsample.
+use_oarwm = False
+mhst_k = 3            # hypotheses K (ablation 5.2-2: 1 / 3 / 5 / 10)
+mhst_sigma_min = 0.1  # occluded-cell uncertainty lower bound Σ_min
+mhst_sigma_reg_weight = 1e-4  # placeholder weight (Stage 6: L_uncertainty)
+assert (not use_oarwm) or use_osz, \
+    'use_oarwm (Stage 3 MHST) requires a mask source: ' \
+    'set use_osz_midas or use_osz_rcsample'
+
 #
 plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
@@ -90,6 +103,10 @@ bev_w_ = 100
 queue_length = 0 # each sequence contains `queue_length` frames.
 total_epochs = 12
 
+# OARWM experiment output dir (train.py: cfg.work_dir wins over the
+# auto-derived work_dirs/<config-name>; CLI --work-dir overrides it).
+work_dir = 'work_dirs/oa_resworld'
+
 multi_adj_frame_id_cfg = (1, 1+2, 1)
 numC_Trans=80
 
@@ -149,6 +166,10 @@ model = dict(
         ego_lcf_feat_idx=None,
         valid_fut_ts=6,
         use_osz=use_osz,  # injection gate (offline or online source)
+        use_oarwm=use_oarwm,  # Stage-3 MHST head (plan B)
+        mhst_k=mhst_k,
+        mhst_sigma_min=mhst_sigma_min,
+        mhst_sigma_reg_weight=mhst_sigma_reg_weight,
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,
