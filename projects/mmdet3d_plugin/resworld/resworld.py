@@ -151,7 +151,10 @@ class ResWorld(BEVDepth4D):
             # discrete geometry detaches it, so it conditions like GT masks.
             # No lidar_depth on purpose: training and test masks stay
             # symmetric (both pure model depth).
-            kwargs['osz_mask'] = self.build_osz_mask_online(depth, img_inputs)
+            # RCSample returns the depth as a per-scale list ([tensor] for
+            # scale_num=1); the online mask needs the single main-scale
+            # softmax distribution.
+            kwargs['osz_mask'] = self.build_osz_mask_online(depth[0], img_inputs)
         bev_inputs = [img_feats[0], kwargs['can_bus']]
         losses_pts = self.forward_pts_train(bev_inputs, gt_bboxes_3d, gt_labels_3d,
                                             map_gt_bboxes_3d, map_gt_labels_3d, img_metas,
@@ -259,7 +262,8 @@ class ResWorld(BEVDepth4D):
         if self.use_osz_rcsample and depth is not None:
             # Online (same-source) mask at test time too (deployment form);
             # overrides the offline osz_mask passed by forward_test.
-            osz_mask = self.build_osz_mask_online(depth, img_inputs)
+            # depth is a per-scale list from RCSample; take the main scale.
+            osz_mask = self.build_osz_mask_online(depth[0], img_inputs)
         bbox_list = [dict() for i in range(len(img_metas))]
         bev_inputs = [img_feats[0], kwargs['can_bus']]
         bbox_pts, metric_dict = self.simple_test_pts(
