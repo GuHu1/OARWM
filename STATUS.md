@@ -82,8 +82,8 @@ bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
 ### 3.2 评估（UniAD/VAD 风格开环指标）
 
 ```shell
-bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
-    work_dirs/resworld_config/epoch_12_ema.pth 4 --eval bbox
+bash 
+nohup bash -c "CUDA_VISIBLE_DEVICES=4,5,6,7 tools/dist_test.sh projects/configs/resworld/resworld_config.py work_dirs/resworld_config/epoch_12_ema.pth 4 --eval bbox" > /data2/jhc/OARWM/work_dirs/eval.log 2>&1 &
 ```
 
 官方参考指标（README）：
