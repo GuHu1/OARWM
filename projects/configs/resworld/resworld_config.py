@@ -18,7 +18,7 @@ _base_ = [
 #                    loop (GPU OSZ geometry adds tens of ms/step).
 # One switch per stage; later stages (3+) get their own flags.
 use_osz_midas = False
-use_osz_rcsample = False
+use_osz_rcsample = True
 assert not (use_osz_midas and use_osz_rcsample), \
     'use_osz_midas and use_osz_rcsample are mutually exclusive'
 # Injection gate for the head: True iff any mask source is active.
@@ -29,7 +29,7 @@ use_osz = use_osz_midas or use_osz_rcsample
 #        §3.5); False = strict baseline (head not even created).
 # MHST needs a mask to know where the occluded cells are, so it implies
 # a mask source: use_oarwm=True requires use_osz_midas or use_osz_rcsample.
-use_oarwm = False
+use_oarwm = True
 mhst_k = 3            # hypotheses K (ablation 5.2-2: 1 / 3 / 5 / 10)
 mhst_sigma_min = 0.1  # occluded-cell uncertainty lower bound Σ_min
 mhst_sigma_reg_weight = 1e-4  # placeholder weight (Stage 6: L_uncertainty)
