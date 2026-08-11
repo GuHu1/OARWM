@@ -323,12 +323,16 @@ class ResWorldHead(BaseModule):
         bev_embed = self.bev_fusion_conv(bev_embed.reshape(bs, self.num_frames * c, h, w))
         if self.use_osz and osz_mask is not None:
             # Stage-2 occlusion-aware injection (OARWM). Mask channels are
-            # (osz_eye, osz_ground, semi), grid-aligned with the BEV feature
-            # map (200x200, see OSZ/config.py); all-zeros = identity.
-            if osz_mask.shape[-2:] != (h, w):
-                osz_mask = F.interpolate(
-                    osz_mask, size=(h, w), mode="nearest")
-            bev_embed = self.osz_fusion(bev_embed, osz_mask.to(device).to(dtype))
+            # (osz_eye, osz_ground, semi). The mask is 4D (B, 3, H, W) by
+            # contract: the online mask (rcsample) returns it directly and
+            # the offline npz is collated (torch default_collate stacks the
+            # (3, H, W) arrays along a new batch dim). All-zeros = identity.
+            assert osz_mask.dim() == 4, \
+                f"osz_mask must be (B, 3, H, W), got {tuple(osz_mask.shape)}"
+            m = osz_mask.to(device=device).to(dtype)
+            if m.shape[-2:] != (h, w):
+                m = F.interpolate(m, size=(h, w), mode="nearest")
+            bev_embed = self.osz_fusion(bev_embed, m)
         bev_feats = bev_feats.view(self.num_frames, bs, c, h, w)
 
 
@@ -415,14 +419,29 @@ class ResWorldHead(BaseModule):
         mhst_aux = None
         if self.use_oarwm and osz_mask is not None:
             # Stage-3 MHST: K-hypothesis mixture inside occluded cells.
-            # The mask is aligned to the fused BEV resolution and dtype HERE
-            # (independent of the Stage-2 branch, which may not run), so the
-            # head never sees a resolution/dtype mismatch.
-            mhst_mask = osz_mask.to(device=device, dtype=pred_bev.dtype)
-            if mhst_mask.shape[-2:] != pred_bev.shape[-2:]:
+            #
+            # Layout contract (verified against the pipeline):
+            #  * pred_bev from the tokenfuser is ALWAYS (B, H*W, C) — the
+            #    ResWorld residual path flattens the BEV grid (H=W=100 here,
+            #    see the bev_query <-> pos_embd cat) row-major into a
+            #    sequence that col_attn consumes via permute(1,0,2).
+            #  * MHST is a per-cell convolution head (prior/backbone/experts
+            #    are Conv2d), so it operates on the SAME data in 2D grid
+            #    form (B, C, H, W). We restore the grid, run the head, and
+            #    flatten back before col_attn — a lossless layout change,
+            #    not an alternative representation.
+            #  * The OSZ mask is (B, 3, 200, 200) (grid_config); the BEV
+            #    feature is 100x100, so the mask is downsampled (nearest).
+            pb = pred_bev.permute(0, 2, 1).reshape(bs, c, h, w)
+            # Same 4D mask contract as Stage 2 (online mask / collated npz).
+            assert osz_mask.dim() == 4, \
+                f"osz_mask must be (B, 3, H, W), got {tuple(osz_mask.shape)}"
+            mhst_mask = osz_mask.to(device=device, dtype=pb.dtype)
+            if mhst_mask.shape[-2:] != (h, w):
                 mhst_mask = F.interpolate(
-                    mhst_mask, size=pred_bev.shape[-2:], mode="nearest")
-            pred_bev, mhst_aux = self.mhst(pred_bev, mhst_mask)
+                    mhst_mask, size=(h, w), mode="nearest")
+            fused, mhst_aux = self.mhst(pb, mhst_mask)
+            pred_bev = fused.reshape(bs, c, h * w).permute(0, 2, 1)
         elif self.use_oarwm:
             # Fail loudly: MHST without a mask source would silently produce
             # an identity (and leave all its params unused under DDP). The
