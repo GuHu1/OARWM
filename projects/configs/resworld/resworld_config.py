@@ -105,7 +105,7 @@ total_epochs = 12
 
 # OARWM experiment output dir (train.py: cfg.work_dir wins over the
 # auto-derived work_dirs/<config-name>; CLI --work-dir overrides it).
-work_dir = 'work_dirs/oa_resworld'
+work_dir = 'work_dirs/oa_resworld_config'
 
 multi_adj_frame_id_cfg = (1, 1+2, 1)
 numC_Trans=80

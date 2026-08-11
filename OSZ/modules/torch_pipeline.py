@@ -106,7 +106,7 @@ def depth_maps_to_bev_height_torch(
     pts_cam = torch.stack([x_cam, y_cam, z_cam,
                            torch.ones_like(z_cam)], dim=-1).unsqueeze(-1)
     # T: (N, 1, 1, 4, 4) @ (N, H, W, 4, 1) -> (N, H, W, 4, 1)
-    pts_ego = (T_cam2ego.view(N, 1, 1, 4, 4) @ pts_cam)[..., 0]  # (N, H, W, 4)
+    pts_ego = (T_cam2ego.reshape(N, 1, 1, 4, 4) @ pts_cam)[..., 0]  # (N, H, W, 4)
 
     valid = (d > 0.0) & (d < max_depth)
     z_ok = (pts_ego[..., 2] >= z_min) & (pts_ego[..., 2] <= z_max)
@@ -178,7 +178,7 @@ def depth_maps_to_bev_height_uncertainty_torch(
     z_cam = d
     pts_cam = torch.stack([x_cam, y_cam, z_cam,
                            torch.ones_like(z_cam)], dim=-1).unsqueeze(-1)
-    pts_ego = (T_cam2ego.view(N, 1, 1, 4, 4) @ pts_cam)[..., 0]  # (N,H,W,4)
+    pts_ego = (T_cam2ego.reshape(N, 1, 1, 4, 4) @ pts_cam)[..., 0]  # (N,H,W,4)
 
     valid = (d > 0.0) & (d < max_depth)
     z_ok = (pts_ego[..., 2] >= z_min) & (pts_ego[..., 2] <= z_max)
@@ -421,8 +421,11 @@ def build_osz_mask_online(
     A = post_rots.clone()
     A[:, :, :2, 2] = post_trans[:, :, :2]
     A[:, :, 2, 2] = 1.0
-    K_eff = torch.matmul(A, intrins).view(BN, 3, 3)
-    T_ego = sensor2ego.view(BN, 4, 4)
+    K_eff = torch.matmul(A, intrins).reshape(BN, 3, 3)
+    # sensor2ego comes from prepare_inputs (matmul -> float -> split ->
+    # squeeze), whose strides are not contiguous; reshape (not view) copies
+    # when needed.
+    T_ego = sensor2ego.reshape(BN, 4, 4)
 
     masks = []
     with torch.no_grad():
@@ -434,7 +437,7 @@ def build_osz_mask_online(
             metric, size=(in_h, in_w), mode="bilinear", align_corners=False,
         )
         # Undo the GT/depth_scale convention: post_rot[2,2] == 1/depth_scale.
-        ds = (1.0 / post_rots[:, :, 2, 2]).view(BN, 1, 1, 1).to(metric.dtype)
+        ds = (1.0 / post_rots[:, :, 2, 2]).reshape(BN, 1, 1, 1).to(metric.dtype)
         metric = metric * ds
         for b in range(B):
             sl = slice(b * N, (b + 1) * N)
