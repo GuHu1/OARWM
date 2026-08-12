@@ -632,13 +632,18 @@ class ResWorldHead(BaseModule):
             occ_mask = mask > 0
             n_occ = occ_mask.float().sum().clamp(min=1.0)
 
-            # 6.3 L_div: maximise pairwise separation of hypothesis residuals.
+            # 6.3 L_div: maximise pairwise separation of hypothesis residuals
+            # (occluded cells, normalised by the occluded residual energy so
+            # the term is scale-free and does not dominate the total loss).
             if self.loss_div_weight > 0 and delta.shape[1] > 1:
+                m = occ_mask.float()
+                base = (delta.pow(2) * m).sum() / n_occ + 1e-6
                 pair_d2 = []
                 for k1 in range(delta.shape[1]):
                     for k2 in range(k1 + 1, delta.shape[1]):
-                        pair_d2.append(
-                            (delta[:, k1] - delta[:, k2]).pow(2).mean())
+                        d2 = ((delta[:, k1] - delta[:, k2]).pow(2)
+                              * m).sum() / n_occ
+                        pair_d2.append(d2 / base)
                 loss_dict['loss_div'] = (
                     -torch.stack(pair_d2).mean() * self.loss_div_weight)
 
