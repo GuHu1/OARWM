@@ -204,11 +204,11 @@ mhst_sigma_reg_weight = 1e-4  # sigma 占位正则权重（Stage 6 换 L_uncerta
    - **设计接口（未实现，勿当作已实现能力）**：§3.4 信念修正（π 更新需下一帧观测，ResWorld 当前单帧推理）与 3.3 时序递归（T 步 rollout，当前为单帧 K 假设补丁）——后者属 Stage 4 时空演化接口；论文写作须与实现状态区分；
    - 提示性/讨论性内容（答辩词、limitation 讨论、L_occ_halluc 设计记录、σ 校准权衡）已移至仓库根 **`TEMP.md`**，设计文档只保留符合代码最终设计的内容。
 2. **Stage 4 遮挡想象风险解码与时空风险场 —— 已实现（`use_risk_field`，默认开）**：
-   - 语义不可知风险分解 `R^(k) = w_σ·σ·‖ΔB^(k)‖·1[M]` → 双输出 `R_exp`（CVaR）/ `R_worst`（Minimax）→ 不确定性驱动放大 `(1+β·U·M)`、`U=H(π)/logK`；输出 `outs['risk_field']`；
+   - 语义不可知风险分解 `R^(k) = w_σ·σ·‖ΔB^(k)‖·1[M]` → 双输出 `R_exp`（CVaR）/ `R_worst`（Minimax）→ 不确定性驱动放大 `(1+β·U·M)`、`U=H(π)/logK` → **占用驱动放大 `(1+γ·s_occ·M)`**（`s_occ` 为遮挡区占用概率，把"变化强度"过滤成"有威胁的变化"）；输出 `outs['risk_field']`；
    - 无学习参数（纯函数 `build_risk_field`）；时空演化接口 `R_{t+τ}` 与语义解码器可选臂仍为设计态；
-   - 配置：`use_risk_field=True`（默认）、`risk_beta=2.0`、`risk_w_sigma=1.0`。
+   - 配置：`use_risk_field=True`（默认）、`risk_beta=2.0`、`risk_w_sigma=1.0`、`risk_gamma=1.0`。
 3. **Stage 5 鲁棒规划**：Minimax 安全筛选 + CVaR 约束 + 信息增益奖励（`planner/` 与 `plan_loss.py` 改造）。
-4. **Stage 6 训练目标（四项损失已实现，`L_info` 待 Stage 5）**：`L_occ_halluc`（**混合模型对数似然**，同时拟合 π/ΔB/σ）+ `L_occ_gt`（**检测框 GT 栅格化** BEV 占用，动态内容监督）+ `L_div`（ΔB 两两距离，假设多样性）+ `L_uncertainty`（**显式校准**，σ = 暴露误差平方，替代原占位正则 `loss_mhst_sigma`）；均需 next 帧暴露真值（数据管线已加独立 `next_img_inputs` 通道，仅作监督不进训练输入）；权重 `loss_div/occ_halluc/uncertainty/occ_gt_weight`（0=关）进 `resworld_config.py`。
+4. **Stage 6 训练目标（四项损失已实现，`L_info` 待 Stage 5）**：`L_occ_halluc`（**混合模型对数似然**，同时拟合 π/ΔB/σ）+ `L_occ_gt`（**检测框 GT 栅格化** BEV 占用，BCE 带 `pos_weight=5.0` 对抗全 0 平凡解，动态内容监督）+ `L_div`（**余弦相似度**，有界 [-1,1] 梯度稳定，假设多样性）+ `L_uncertainty`（**显式校准**，σ = 暴露误差平方，替代原占位正则 `loss_mhst_sigma`）；均需 next 帧暴露真值（数据管线已加独立 `next_img_inputs` 通道，仅作监督不进训练输入）；权重 `loss_div/occ_halluc/uncertainty/occ_gt_weight`（0=关）+ `loss_occ_gt_pos_weight` 进 `resworld_config.py`；**当前 `mhst_k=5`**（K 假设数）。
 5. **消融**：w/o 掩码注入（`use_osz_midas=False` 且 `use_osz_rcsample=False` 即等价基线）、K=1 vs K=3/5/10（`mhst_k`）、Minimax/CVaR/信息增益开关。
 
 ---

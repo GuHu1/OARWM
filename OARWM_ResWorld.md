@@ -241,9 +241,9 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
    $$R_{\text{exp}}(x,y) = \sum_{k=1}^K \pi_k(x,y)\, R^{(k)}(x,y), \qquad R_{\text{worst}}(x,y) = \max_{k} R^{(k)}(x,y)$$
    期望风险供 CVaR/常规规划，**最坏风险**供 Minimax——最坏假设（如"可能冲出人"的低先验假设）显式保留到决策层（见 TEMP.md"多假设价值链条"）。
 
-3. **不确定性驱动遮挡放大（替代常数 $\alpha \cdot M$）**:
-   $$\tilde{R}(x,y) = R(x,y) \cdot \big(1 + \beta \cdot U(x,y) \cdot M_t^{occ}(x,y)\big), \quad U(x,y) = \frac{H(\pi(x,y))}{\log K} \in [0,1]$$
-   其中 $H(\pi) = -\sum_k \pi_k \log \pi_k$ 为假设分布熵，$\beta$ 为放大上限超参。语义：**遮挡 + 高不确定（π 接近均匀）→ 强放大（可能鬼探头）；遮挡 + 低不确定（信念接近单点，如"墙后确定是墙"）→ 不放大**——逐格可归因，替代初稿对所有遮挡格一视同仁的常数 α。
+3. **不确定性 + 占用驱动遮挡放大（替代常数 $\alpha \cdot M$）**:
+   $$\tilde{R}(x,y) = R(x,y) \cdot \big(1 + \beta \cdot U(x,y) \cdot M_t^{occ}(x,y)\big) \cdot \big(1 + \gamma \cdot s_{\text{occ}}(x,y) \cdot M_t^{occ}(x,y)\big), \quad U(x,y) = \frac{H(\pi(x,y))}{\log K} \in [0,1]$$
+   其中 $H(\pi) = -\sum_k \pi_k \log \pi_k$ 为假设分布熵，$\beta$ 为不确定性放大上限，$s_{\text{occ}}$ 为遮挡区占用概率（6.2b 的占用头输出，$[0,1]$），$\gamma$ 为占用放大权重。语义：**遮挡 + 高不确定（π 均匀）→ 强放大（可能鬼探头）；遮挡 + 低不确定（信念单点，如"墙后确定是墙"）→ 不放大**；**占用高（检测框 GT 指示有动态物）→ 额外放大**——把"变化强度"过滤成"有威胁的变化"，替代初稿对所有遮挡格一视同仁的常数 α。
 
 4. **时空演化接口（先单帧落地，接口为时变）**: 沿候选轨迹/自车运动重采样得 $R_{t+\tau}$；遮挡暴露后按 Stage 3.4 更新 π（信念修正）→ 风险回落 $\Delta R = R_t - R_{t+\tau}$。**实现状态**：当前先实现单帧 $R_t$（`use_risk_field` 开关），时变重采样与 π 更新为接口（与 Stage 5 信息增益奖励联动，见 5.4）。
 
@@ -320,15 +320,15 @@ $$L_{\text{occ\_halluc}} = -\log \sum_{k=1}^K \pi_t^{A,k} \cdot \mathcal{N}\big(
 
 鬼探头场景内容突变，6.2 的暴露自监督对其无效（t 时刻输入无信息）。用**已有检测框 GT** 提供遮挡区的动态内容目标——零新数据、不引入多类别语义（保持语义不可知设计）：
 
-$$L_{\text{occ\_gt}} = \sum_{(x,y) \in \mathcal{O}_t} \text{BCE}\big(s_{\text{occ}}(\hat{B}_{t+1}(x,y)),\, S_{\text{gt}}(x,y)\big)$$
+$$L_{\text{occ\_gt}} = \sum_{(x,y) \in \mathcal{O}_t} \text{BCE}\big(s_{\text{occ}}(\hat{B}_{t+1}(x,y)),\, S_{\text{gt}}(x,y);\ \text{pos\_weight}\big)$$
 
-其中 $S_{\text{gt}}$ 由 `gt_bboxes_3d`（已在训练 batch）动态栅格化到 BEV 网格（二值：是否有动态障碍物），$s_{\text{occ}}$ 为遮挡区小占用头（1×1 Conv from `pred_bev`）。分工：**6.2 监督静态、6.2b 监督动态、6.3 维持假设分离**。$s_{\text{occ}}$ 输出可被 Stage 4 风险场增强使用（风险 = 占用概率 × 内容变化强度）。
+其中 $S_{\text{gt}}$ 由 `gt_bboxes_3d`（已在训练 batch）动态栅格化到 BEV 网格（二值：是否有动态障碍物），$s_{\text{occ}}$ 为遮挡区小占用头（1×1 Conv from `pred_bev`），**`pos_weight`（默认 5.0）惩罚漏报占用格**——遮挡区绝大多数格为空（类别不平衡），不加权会退化为全 0 平凡解，学到"遮挡区动态内容"。分工：**6.2 监督静态、6.2b 监督动态、6.3 维持假设分离**。$s_{\text{occ}}$ 输出被 Stage 4 风险场用作**占用驱动放大**（第 3 步的 $\gamma \cdot s_{\text{occ}}$）。
 
 #### 6.3 多假设多样性损失 (已实现)
 
-防止 $K$ 个假设坍缩为相似模式：
-$$L_{\text{div}} = -\sum_{k_1 \neq k_2} \text{KL}(p^{(k_1)} \| p^{(k_2)})$$
-鼓励不同假设之间的分布差异最大化。
+防止 $K$ 个假设坍缩为相似模式（**实现为余弦相似度**，单位化后有界 [-1,1]、梯度稳定）：
+$$L_{\text{div}} = \frac{2}{K(K-1)} \sum_{k_1 < k_2} \cos\big(\Delta B^{(k_1)},\, \Delta B^{(k_2)}\big) \cdot w_{\text{div}}$$
+最小化假设残差间的余弦相似度（鼓励方向分离），替代 KL 伪分布（MHST 假设是特征残差非分布）。
 
 #### 6.4 不确定性校准损失 (已实现，替代原占位正则)
 

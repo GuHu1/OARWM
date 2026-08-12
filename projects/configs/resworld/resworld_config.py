@@ -30,7 +30,7 @@ use_osz = use_osz_midas or use_osz_rcsample
 # MHST needs a mask to know where the occluded cells are, so it implies
 # a mask source: use_oarwm=True requires use_osz_midas or use_osz_rcsample.
 use_oarwm = True
-mhst_k = 3            # hypotheses K (ablation 5.2-2: 1 / 3 / 5 / 10)
+mhst_k = 5            # hypotheses K (ablation 5.2-2: 1 / 3 / 5 / 10)
 mhst_sigma_min = 0.1  # occluded-cell uncertainty lower bound Σ_min
 assert (not use_oarwm) or use_osz, \
     'use_oarwm (Stage 3 MHST) requires a mask source: ' \
@@ -40,6 +40,7 @@ assert (not use_oarwm) or use_osz, \
 use_risk_field = True     # False = skip the risk field (pure MHST forward)
 risk_beta = 2.0           # uncertainty-driven boost upper bound (β)
 risk_w_sigma = 1.0        # σ scaling in the risk proxy (w_σ)
+risk_gamma = 1.0          # occupancy-driven boost weight (γ, on s_occ·M)
 assert (not use_risk_field) or use_oarwm, \
     'use_risk_field (Stage 4) requires use_oarwm (Stage 3)'
 
@@ -48,6 +49,7 @@ loss_div_weight = 0.1            # hypothesis diversity (ΔB pairwise)
 loss_occ_halluc_weight = 1.0     # exposure mixture likelihood
 loss_uncertainty_weight = 1.0    # σ calibration
 loss_occ_gt_weight = 1.0         # detection-box BEV occupancy BCE
+loss_occ_gt_pos_weight = 5.0     # BCE pos_weight (penalise missed occupancies)
 
 #
 plugin = True
@@ -185,10 +187,12 @@ model = dict(
         use_risk_field=use_risk_field,  # Stage-4 risk field
         risk_beta=risk_beta,
         risk_w_sigma=risk_w_sigma,
+        risk_gamma=risk_gamma,
         loss_div_weight=loss_div_weight,
         loss_occ_halluc_weight=loss_occ_halluc_weight,
         loss_uncertainty_weight=loss_uncertainty_weight,
         loss_occ_gt_weight=loss_occ_gt_weight,
+        loss_occ_gt_pos_weight=loss_occ_gt_pos_weight,
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,

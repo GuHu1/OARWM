@@ -101,7 +101,8 @@ class OcclusionAwareFusion(nn.Module):
         return bev * (1 - m) + e_occ * m
 
 
-def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0):
+def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0,
+                     s_occ=None, gamma=1.0):
     """Stage-4 occlusion-aware risk field (semantic-agnostic proxy, no params).
 
     Consumes the MHST aux outputs (design doc Stage 4):
@@ -109,7 +110,11 @@ def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0):
         R_exp    = sum_k pi_k R^(k)                        expected risk (CVaR)
         R_worst  = max_k R^(k)                             worst hypothesis (Minimax)
         U        = H(pi) / log K                           normalised prior entropy
-        R~       = R * (1 + beta * U * M)                  uncertainty-driven boost
+        boost    = (1 + beta*U*M) * (1 + gamma*s_occ*M)    uncertainty-driven AND
+                                                           occupancy-driven boost
+    ``s_occ`` (if given) is the occlusion occupancy probability in [0,1];
+    it amplifies the risk where a dynamic object is predicted — turning raw
+    "change intensity" into "threatening change".
 
     Returns ``(B, 2, H, W)`` = ``[R~_exp, R~_worst]``. All-zero mask -> 0 risk.
     K=1: pi == 1 so H(pi) == 0 and U == 0 (no multi-hypothesis uncertainty).
@@ -124,6 +129,8 @@ def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0):
     h_pi = -(pi * torch.log(pi.clamp(min=1e-12))).sum(dim=1)   # (B,H,W)
     u = h_pi / log_k                                  # (B,H,W) in [0,1]
     boost = 1.0 + beta * u * m[:, 0]                  # (B,H,W)
+    if s_occ is not None:
+        boost = boost * (1.0 + gamma * s_occ[:, 0] * m[:, 0])
     r_exp = r_exp * boost
     r_worst = r_worst * boost
     return torch.stack([r_exp, r_worst], dim=1)       # (B,2,H,W)
@@ -246,11 +253,13 @@ class ResWorldHead(BaseModule):
                  use_risk_field=False,
                  risk_beta=2.0,
                  risk_w_sigma=1.0,
+                 risk_gamma=1.0,
                  # Stage-6 loss weights (0 disables the term).
                  loss_div_weight=0.1,
                  loss_occ_halluc_weight=1.0,
                  loss_uncertainty_weight=1.0,
                  loss_occ_gt_weight=1.0,
+                 loss_occ_gt_pos_weight=5.0,
                  **kwargs):
         super(ResWorldHead, self).__init__()
         self.bev_h = bev_h
@@ -287,11 +296,13 @@ class ResWorldHead(BaseModule):
         self.use_risk_field = use_risk_field
         self.risk_beta = risk_beta
         self.risk_w_sigma = risk_w_sigma
+        self.risk_gamma = risk_gamma
         # Stage-6 loss weights (per-term switch via weight=0).
         self.loss_div_weight = loss_div_weight
         self.loss_occ_halluc_weight = loss_occ_halluc_weight
         self.loss_uncertainty_weight = loss_uncertainty_weight
         self.loss_occ_gt_weight = loss_occ_gt_weight
+        self.loss_occ_gt_pos_weight = loss_occ_gt_pos_weight
         self._init_layers()
         self.loss_plan_reg = build_loss(loss_plan_reg)
         self.loss_plan_reg_init = build_loss(loss_plan_reg)
@@ -531,7 +542,8 @@ class ResWorldHead(BaseModule):
                     rf_mask, size=(h, w), mode="nearest")
             risk_field = build_risk_field(
                 mhst_aux['pi'], mhst_aux['sigma'], mhst_aux['delta'],
-                rf_mask, beta=self.risk_beta, w_sigma=self.risk_w_sigma)
+                rf_mask, beta=self.risk_beta, w_sigma=self.risk_w_sigma,
+                s_occ=mhst_aux.get('s_occ'), gamma=self.risk_gamma)
 
         way_point = self.col_attn(
                 query=way_point,
@@ -682,9 +694,16 @@ class ResWorldHead(BaseModule):
                 s_occ = mhst['s_occ']     # (B, 1, H, W)
                 occ_gt = self._rasterise_boxes_bev(
                     gt_bboxes_list, img_metas, device=s_occ.device)
+                # pos_weight penalises missed occupancies -> learns the
+                # occluded dynamic content instead of the all-zero trivial
+                # solution (class imbalance: occluded cells are mostly empty).
+                pos = torch.as_tensor(
+                    self.loss_occ_gt_pos_weight, dtype=s_occ.dtype,
+                    device=s_occ.device)
                 loss_dict['loss_occ_gt'] = (
                     F.binary_cross_entropy_with_logits(
-                        s_occ, occ_gt, reduction='none') * occ_mask.float()
+                        s_occ, occ_gt, pos_weight=pos, reduction='none')
+                    * occ_mask.float()
                 ).sum() / n_occ * self.loss_occ_gt_weight
 
         return loss_dict
