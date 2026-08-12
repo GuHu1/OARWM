@@ -256,6 +256,42 @@ class PrepareImageInputs(object):
                     sensor2egos.append(sensor2ego)
                     ego2globals.append(ego2global)
 
+        # Next-frame supervision channel (exposure ground truth for
+        # L_occ_halluc / L_uncertainty). Encoded with the SAME augmentation
+        # parameters as the current frame, but kept as an INDEPENDENT
+        # single-frame input: it never enters the main img_inputs / multi-
+        # frame fusion. sensor2keyego maps next sensor -> CURRENT ego frame
+        # so the encoded B_{t+1} lands in the current ego frame directly.
+        next_img_inputs = None
+        if self.sequential and 'next' in results:
+            imgs_next, s2key_next, ego2g_next = [], [], []
+            _, curr_ego2global = self.get_sensor_transforms(
+                results['curr'], cam_names[0])
+            global2curr = torch.inverse(curr_ego2global.double())
+            for cam_name in cam_names:
+                cam_data = results['next']['cams'][cam_name]
+                img_next = Image.open(cam_data['data_path'])
+                img_next = self.img_transform_core(
+                    img_next, resize_dims=resize_dims, crop=crop,
+                    flip=flip, rotate=rotate)
+                imgs_next.append(self.normalize_img(img_next))
+                s2e_n, e2g_n = self.get_sensor_transforms(
+                    results['next'], cam_name)
+                s2key_n = (
+                    global2curr @ e2g_n.double() @ s2e_n.double()
+                ).float()  # next sensor -> current ego
+                s2key_next.append(s2key_n)
+                ego2g_next.append(e2g_n)
+            next_img_inputs = (
+                torch.stack(imgs_next), torch.stack(s2key_next),
+                torch.stack(ego2g_next),
+                torch.stack(intrins[:len(cam_names)]),
+                torch.stack(post_rots[:len(cam_names)]),
+                torch.stack(post_trans[:len(cam_names)]),
+                torch.eye(3),
+            )
+            results['next_img_inputs'] = next_img_inputs
+
         imgs = torch.stack(imgs)
         sensor2egos = torch.stack(sensor2egos)
         ego2globals = torch.stack(ego2globals)

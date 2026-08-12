@@ -32,13 +32,13 @@ Examples
     #   midas   (default): MiDaS v2.1 Small + LiDAR scale alignment
     #   rcsample          : ResWorld's own RCSample depth head
     #                       (mmdet3d env + --rcsample-ckpt, e.g. the trained
-    #                       EMA weights work_dirs/oa_resworld/
+    #                       EMA weights work_dirs/oa_resworld_config/
     #                       epoch_12_ema.pth — export AFTER training)
     #   lidar             : LiDAR densified depth (upper bound)
     python OSZ/export_osz_dataset.py --dataroot data/nuscenes \\
         --version v1.0-trainval --outdir data/osz_rcsample \\
         --depth-source rcsample \\
-        --rcsample-ckpt work_dirs/oa_resworld/epoch_12_ema.pth
+        --rcsample-ckpt work_dirs/oa_resworld_config/epoch_12_ema.pth
 """
 from __future__ import annotations
 
@@ -228,7 +228,7 @@ def main() -> None:
     parser.add_argument(
         "--rcsample-ckpt", type=str, default="",
         help="Trained ResWorld checkpoint (required for --depth-source "
-             "rcsample), e.g. work_dirs/oa_resworld/epoch_12_ema.pth "
+             "rcsample), e.g. work_dirs/oa_resworld_config/epoch_12_ema.pth "
              "(EMA weights, export AFTER training).")
     parser.add_argument(
         "--backend", type=str, default="auto",

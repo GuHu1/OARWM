@@ -62,8 +62,15 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
         # both sources off).
         self.use_osz = kwargs.pop('use_osz', False)
         self.osz_dir = kwargs.pop('osz_dir', None)
+        # Next-frame supervision channel: independent of the mask source
+        # (both midas and rcsample need the exposure ground truth).
+        self.use_next = kwargs.pop('use_next', False)
         super().__init__(*args, **kwargs)
         self.multi_adj_frame_id_cfg = multi_adj_frame_id_cfg
+        # token -> index lookup for the next-frame supervision channel.
+        self._token2idx = {
+            inf['token']: i for i, inf in enumerate(self.data_infos)
+        }
         
 
     def get_data_info(self, index):
@@ -198,6 +205,14 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
         input_dict.update(dict(curr=info))
         info_adj_list = self.get_adj_info(info, index)
         input_dict.update(dict(adjacent=info_adj_list))
+        if self.use_next and info.get('next'):
+            # Next-frame supervision channel (exposure ground truth): the
+            # t+1 info is loaded as an INDEPENDENT key — it never enters the
+            # main img_inputs / multi-frame fusion; it is only encoded to
+            # B_{t+1} as supervision for L_occ_halluc / L_uncertainty.
+            next_idx = self._token2idx.get(info['next'])
+            if next_idx is not None:
+                input_dict['next'] = self.data_infos[next_idx]
         if 'scene_token' in info:
             input_dict['scene_token'] = info['scene_token']
         if 'lidar_token' in info:
@@ -248,6 +263,11 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
 
         input_dict = self.get_data_info(index)
         if input_dict is None:
+            return None
+        if self.use_next and 'next' not in input_dict:
+            # No next frame (sequence end): the exposure ground truth would
+            # be missing, leaving sigma_net without supervision (DDP unused-
+            # parameter failure). Skip this sample.
             return None
         frame_idx = input_dict['frame_idx']
         scene_token = input_dict['scene_token']

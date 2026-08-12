@@ -25,17 +25,29 @@ assert not (use_osz_midas and use_osz_rcsample), \
 use_osz = use_osz_midas or use_osz_rcsample
 
 # --- Stage-3 OARWM switch (multi-hypothesis stochastic transition, MHST) ---
-# True = graft the MHST head on pred_bev (main plan B, OARWM_ResWorld.md
-#        §3.5); False = strict baseline (head not even created).
+# True = graft the MHST head on pred_bev (OARWM_ResWorld.md
+#        Stage 3); False = strict baseline (head not even created).
 # MHST needs a mask to know where the occluded cells are, so it implies
 # a mask source: use_oarwm=True requires use_osz_midas or use_osz_rcsample.
 use_oarwm = True
 mhst_k = 3            # hypotheses K (ablation 5.2-2: 1 / 3 / 5 / 10)
 mhst_sigma_min = 0.1  # occluded-cell uncertainty lower bound Σ_min
-mhst_sigma_reg_weight = 1e-4  # placeholder weight (Stage 6: L_uncertainty)
 assert (not use_oarwm) or use_osz, \
     'use_oarwm (Stage 3 MHST) requires a mask source: ' \
     'set use_osz_midas or use_osz_rcsample'
+
+# --- Stage-4 risk field switch (semantic-agnostic proxy, no params) ---
+use_risk_field = True     # False = skip the risk field (pure MHST forward)
+risk_beta = 2.0           # uncertainty-driven boost upper bound (β)
+risk_w_sigma = 1.0        # σ scaling in the risk proxy (w_σ)
+assert (not use_risk_field) or use_oarwm, \
+    'use_risk_field (Stage 4) requires use_oarwm (Stage 3)'
+
+# --- Stage-6 loss weights (0 disables a term) ---
+loss_div_weight = 0.1            # hypothesis diversity (ΔB pairwise)
+loss_occ_halluc_weight = 1.0     # exposure mixture likelihood
+loss_uncertainty_weight = 1.0    # σ calibration
+loss_occ_gt_weight = 1.0         # detection-box BEV occupancy BCE
 
 #
 plugin = True
@@ -115,6 +127,7 @@ model = dict(
     align_after_view_transfromation=False,
     num_adj=len(range(*multi_adj_frame_id_cfg)),
     use_osz_rcsample=use_osz_rcsample,
+    use_oarwm=use_oarwm,
     img_backbone=dict(
         type='ResNet',
         depth=50,
@@ -169,7 +182,13 @@ model = dict(
         use_oarwm=use_oarwm,  # Stage-3 MHST head (plan B)
         mhst_k=mhst_k,
         mhst_sigma_min=mhst_sigma_min,
-        mhst_sigma_reg_weight=mhst_sigma_reg_weight,
+        use_risk_field=use_risk_field,  # Stage-4 risk field
+        risk_beta=risk_beta,
+        risk_w_sigma=risk_w_sigma,
+        loss_div_weight=loss_div_weight,
+        loss_occ_halluc_weight=loss_occ_halluc_weight,
+        loss_uncertainty_weight=loss_uncertainty_weight,
+        loss_occ_gt_weight=loss_occ_gt_weight,
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,
@@ -267,7 +286,8 @@ train_pipeline = [
     dict(type='CustomCollect3D',\
          keys=['gt_bboxes_3d', 'gt_labels_3d', 'img_inputs', 'ego_his_trajs', 'gt_depth', 'can_bus',
                'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels']
-         + (['osz_mask'] if use_osz_midas else []))
+         + (['osz_mask'] if use_osz_midas else [])
+         + (['next_img_inputs'] if use_osz else []))
 ]
 
 test_pipeline = [
@@ -317,6 +337,7 @@ data = dict(
         # back to all-zeros = identity.
         osz_dir='data/osz/',
         use_osz=use_osz_midas,
+        use_next=use_osz,
         # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
         # and box_type_3d='Depth' in sunrgbd and scannet dataset.
         box_type_3d='LiDAR',
@@ -330,6 +351,7 @@ data = dict(
              classes=class_names, modality=input_modality, samples_per_gpu=1,
              osz_dir='data/osz/',
              use_osz=use_osz_midas,
+             use_next=use_osz,
              map_classes=map_classes,
              map_ann_file=data_root + 'nuscenes_map_anns_val.json',
              map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_gt_line,
@@ -345,6 +367,7 @@ data = dict(
               classes=class_names, modality=input_modality, samples_per_gpu=1,
               osz_dir='data/osz/',
               use_osz=use_osz_midas,
+              use_next=use_osz,
               map_classes=map_classes,
               map_ann_file=data_root + 'nuscenes_map_anns_val.json',
               map_fixed_ptsnum_per_line=map_fixed_ptsnum_per_gt_line,

@@ -14,6 +14,7 @@ class ResWorld(BEVDepth4D):
                 fut_ts=6,
                 fut_mode=6, 
                 use_osz_rcsample=False,
+                use_oarwm=False,
                 **kwargs):
         super(ResWorld, self).__init__(**kwargs)
         self.fut_ts = fut_ts
@@ -27,8 +28,32 @@ class ResWorld(BEVDepth4D):
         #   use_osz_midas=True                           -> offline npz masks
         #   use_osz_rcsample=True (this)                 -> online RCSample masks
         self.use_osz_rcsample = use_osz_rcsample
+        # Stage-3 switch (mirrors the head's use_oarwm): controls whether the
+        # next-frame exposure ground truth is encoded.
+        self.use_oarwm = use_oarwm
         self._osz_bin_center = None
         self.planning_metric = None
+
+    def encode_next_bev(self, next_img_inputs):
+        """Encode the next-frame BEV as exposure ground truth.
+
+        ``next_img_inputs`` is the independent single-frame channel built by
+        the pipeline (``sensor2keyego`` already maps next sensor -> CURRENT
+        ego frame), so the encoded B_{t+1} lands in the current ego frame.
+        Pure supervision channel: runs under no_grad and NEVER enters the
+        main training inputs / multi-frame fusion / col_attn.
+        """
+        imgs_next, sensor2keyegos_next, ego2globals_next, intrins_next, \
+            post_rots_next, post_trans_next, bda_next = next_img_inputs
+        mlp_input = self.img_view_transformer.get_mlp_input(
+            sensor2keyegos_next, ego2globals_next, intrins_next,
+            post_rots_next, post_trans_next, bda_next)
+        inputs_next = (imgs_next, sensor2keyegos_next, ego2globals_next,
+                       intrins_next, post_rots_next, post_trans_next,
+                       bda_next, mlp_input)
+        with torch.no_grad():
+            bev_next, _ = self.prepare_bev_feat(*inputs_next)
+        return bev_next  # (B, C, H, W) in the current ego frame
 
     def build_osz_mask_online(self, depth, img_inputs, lidar_depth=None):
         """Compute the OSZ mask from the model's own RCSample depth.
@@ -156,13 +181,21 @@ class ResWorld(BEVDepth4D):
             # softmax distribution.
             kwargs['osz_mask'] = self.build_osz_mask_online(depth[0], img_inputs)
         bev_inputs = [img_feats[0], kwargs['can_bus']]
+        # Next-frame exposure ground truth (independent supervision channel
+        # for L_occ_halluc / L_uncertainty): encoded from the pipeline's
+        # next_img_inputs; never part of the main training inputs.
+        gt_bev_next = None
+        if self.use_oarwm and 'next_img_inputs' in kwargs \
+                and kwargs['next_img_inputs'] is not None:
+            gt_bev_next = self.encode_next_bev(kwargs['next_img_inputs'])
         losses_pts = self.forward_pts_train(bev_inputs, gt_bboxes_3d, gt_labels_3d,
                                             map_gt_bboxes_3d, map_gt_labels_3d, img_metas,
                                             gt_bboxes_ignore, map_gt_bboxes_ignore,
                                             ego_his_trajs=ego_his_trajs, ego_fut_trajs=ego_fut_trajs,
                                             ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
                                             ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels,
-                                            osz_mask=kwargs.get('osz_mask'))
+                                            osz_mask=kwargs.get('osz_mask'),
+                                            gt_bev_next=gt_bev_next)
         losses.update(losses_pts)
         return losses
 
@@ -181,11 +214,13 @@ class ResWorld(BEVDepth4D):
                           ego_fut_cmd=None,
                           ego_lcf_feat=None,
                           gt_attr_labels=None,
-                          osz_mask=None):
+                          osz_mask=None,
+                          gt_bev_next=None):
 
         outs = self.pts_bbox_head(pts_feats, img_metas,
                                   ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat, cmd=ego_fut_cmd,
-                                  osz_mask=osz_mask)
+                                  osz_mask=osz_mask,
+                                  gt_bev_next=gt_bev_next)
         loss_inputs = [
             gt_bboxes_3d, gt_labels_3d, map_gt_bboxes_3d, map_gt_labels_3d,
             outs, ego_fut_trajs, ego_fut_masks, ego_fut_cmd, gt_attr_labels,

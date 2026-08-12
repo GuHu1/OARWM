@@ -1,5 +1,5 @@
 import copy
-from math import pi, cos, sin
+from math import pi, cos, sin, log
 import os
 import torch
 import numpy as np
@@ -100,8 +100,36 @@ class OcclusionAwareFusion(nn.Module):
         return bev * (1 - m) + e_occ * m
 
 
+def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0):
+    """Stage-4 occlusion-aware risk field (semantic-agnostic proxy, no params).
+
+    Consumes the MHST aux outputs (design doc Stage 4):
+        R^(k)    = w_sigma * sigma * ||dB^(k)||_2 * M      per-hypothesis risk
+        R_exp    = sum_k pi_k R^(k)                        expected risk (CVaR)
+        R_worst  = max_k R^(k)                             worst hypothesis (Minimax)
+        U        = H(pi) / log K                           normalised prior entropy
+        R~       = R * (1 + beta * U * M)                  uncertainty-driven boost
+
+    Returns ``(B, 2, H, W)`` = ``[R~_exp, R~_worst]``. All-zero mask -> 0 risk.
+    K=1: pi == 1 so H(pi) == 0 and U == 0 (no multi-hypothesis uncertainty).
+    """
+    B, K, C, H, W = delta.shape
+    m = mask[:, :1]                                   # (B,1,H,W) osz_eye
+    d_norm = delta.norm(dim=2)                        # (B,K,H,W) ||dB^k||_2
+    r_k = w_sigma * sigma * d_norm * m                # (B,K,H,W)
+    r_exp = (pi * r_k).sum(dim=1)                     # (B,H,W)
+    r_worst = r_k.max(dim=1).values                   # (B,H,W)
+    log_k = log(max(K, 2))                            # K=1 -> U=0 (pi=1, H=0)
+    h_pi = -(pi * torch.log(pi.clamp(min=1e-12))).sum(dim=1)   # (B,H,W)
+    u = h_pi / log_k                                  # (B,H,W) in [0,1]
+    boost = 1.0 + beta * u * m[:, 0]                  # (B,H,W)
+    r_exp = r_exp * boost
+    r_worst = r_worst * boost
+    return torch.stack([r_exp, r_worst], dim=1)       # (B,2,H,W)
+
+
 class OcclusionMHSTHead(nn.Module):
-    """Stage-3 multi-hypothesis stochastic transition head (OARWM, 主方案 B).
+    """Stage-3 multi-hypothesis stochastic transition head (OARWM).
 
     Grafted AFTER the ResWorld deterministic residual path (right after
     ``pred_bev = tokenfuser(...) + bev_navi_embed``): inside occluded cells
@@ -111,7 +139,7 @@ class OcclusionMHSTHead(nn.Module):
         B_hat(x,y) = pred_bev(x,y)                              visible
                    = sum_k pi_k(x,y) * (pred_bev + dB^k)(x,y)   occluded
 
-    Components (design doc §3.3 / §3.5, main plan B):
+    Components (design doc Stage 3):
       * prior network g_prior: [pred_bev | mask] -> 1x1 conv -> 3x3 conv
         (the 3x3 aggregates the occluded-boundary neighbourhood N(x,y))
         -> K logits -> softmax = pi (B, K, H, W).
@@ -133,13 +161,19 @@ class OcclusionMHSTHead(nn.Module):
         self.sigma_min = sigma_min
 
         # g_prior: mask + BEV context -> pi over K hypotheses.
-        self.prior = nn.Sequential(
-            nn.Conv2d(in_channels + mask_channels, hidden, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden, hidden, kernel_size=3, padding=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden, k, kernel_size=1),
-        )
+        # Multi-scale dilated neighbourhood (dilation 1/2/4 -> receptive
+        # fields 3/5/9 cells) so the prior sees the occluded-boundary
+        # context N(x,y) beyond the 3-cell limit of a single 3x3 conv
+        # (design doc Stage 3 limitation -> implemented fix).
+        self.prior_conv1 = nn.Conv2d(
+            in_channels + mask_channels, hidden, kernel_size=1)
+        self.prior_d1 = nn.Conv2d(hidden, hidden, kernel_size=3,
+                                  padding=1, dilation=1)
+        self.prior_d2 = nn.Conv2d(hidden, hidden, kernel_size=3,
+                                  padding=2, dilation=2)
+        self.prior_d4 = nn.Conv2d(hidden, hidden, kernel_size=3,
+                                  padding=4, dilation=4)
+        self.prior_out = nn.Conv2d(hidden * 3, k, kernel_size=1)
         # Shared residual backbone, then one expert head per hypothesis.
         self.backbone = nn.Sequential(
             nn.Conv2d(in_channels, hidden, kernel_size=1),
@@ -155,7 +189,12 @@ class OcclusionMHSTHead(nn.Module):
 
     def forward(self, pred_bev, mask):
         m = mask[:, :1]                       # strict occlusion = osz_eye
-        pi = self.prior(torch.cat([pred_bev, mask], dim=1))
+        h0 = F.relu(
+            self.prior_conv1(torch.cat([pred_bev, mask], dim=1)),
+            inplace=True,
+        )
+        branches = [self.prior_d1(h0), self.prior_d2(h0), self.prior_d4(h0)]
+        pi = self.prior_out(torch.cat(branches, dim=1))
         pi = pi.softmax(dim=1)                # (B, K, H, W)
 
         h = self.backbone(pred_bev)           # (B, hidden, H, W)
@@ -198,11 +237,19 @@ class ResWorldHead(BaseModule):
                  # (config: use_osz = use_osz_midas or use_osz_rcsample).
                  use_osz=False,
                  # Stage-3 OARWM switch: multi-hypothesis transition head
-                 # (main plan B, see OARWM_ResWorld.md §3.5).
+                 # (see OARWM_ResWorld.md Stage 3).
                  use_oarwm=False,
                  mhst_k=3,
                  mhst_sigma_min=0.1,
-                 mhst_sigma_reg_weight=1e-4,
+                 # Stage-4 risk field (semantic-agnostic proxy, no params).
+                 use_risk_field=False,
+                 risk_beta=2.0,
+                 risk_w_sigma=1.0,
+                 # Stage-6 loss weights (0 disables the term).
+                 loss_div_weight=0.1,
+                 loss_occ_halluc_weight=1.0,
+                 loss_uncertainty_weight=1.0,
+                 loss_occ_gt_weight=1.0,
                  **kwargs):
         super(ResWorldHead, self).__init__()
         self.bev_h = bev_h
@@ -236,7 +283,14 @@ class ResWorldHead(BaseModule):
         self.use_oarwm = use_oarwm
         self.mhst_k = mhst_k
         self.mhst_sigma_min = mhst_sigma_min
-        self.mhst_sigma_reg_weight = mhst_sigma_reg_weight
+        self.use_risk_field = use_risk_field
+        self.risk_beta = risk_beta
+        self.risk_w_sigma = risk_w_sigma
+        # Stage-6 loss weights (per-term switch via weight=0).
+        self.loss_div_weight = loss_div_weight
+        self.loss_occ_halluc_weight = loss_occ_halluc_weight
+        self.loss_uncertainty_weight = loss_uncertainty_weight
+        self.loss_occ_gt_weight = loss_occ_gt_weight
         self._init_layers()
         self.loss_plan_reg = build_loss(loss_plan_reg)
         self.loss_plan_reg_init = build_loss(loss_plan_reg)
@@ -269,6 +323,10 @@ class ResWorldHead(BaseModule):
             self.mhst = OcclusionMHSTHead(
                 self.in_channels, k=self.mhst_k,
                 sigma_min=self.mhst_sigma_min)
+            if self.loss_occ_gt_weight > 0:
+                # Occlusion occupancy head for L_occ_gt (dynamic content
+                # supervision from rasterised detection-box GT).
+                self.occ_head = nn.Conv2d(self.in_channels, 1, kernel_size=1)
 
         self.way_point = nn.Embedding(self.ego_fut_mode*self.fut_ts, self.embed_dims * 2)
         self.tokenlearner = TokenLearner(self.num_scenes, self.embed_dims * 2)
@@ -308,7 +366,8 @@ class ResWorldHead(BaseModule):
                 ego_his_trajs=None,
                 ego_lcf_feat=None,
                 cmd=None,
-                osz_mask=None
+                osz_mask=None,
+                gt_bev_next=None
             ):
         
         bev_feats, can_bus_infos = bev_inputs
@@ -441,6 +500,12 @@ class ResWorldHead(BaseModule):
                 mhst_mask = F.interpolate(
                     mhst_mask, size=(h, w), mode="nearest")
             fused, mhst_aux = self.mhst(pb, mhst_mask)
+            # Extra aux for the Stage-6 losses: un-fused 4D pred_bev, the
+            # occlusion occupancy prediction and the aligned osz_eye mask.
+            mhst_aux['pred_bev_4d'] = pb
+            mhst_aux['mask'] = mhst_mask[:, :1]
+            if hasattr(self, 'occ_head'):
+                mhst_aux['s_occ'] = self.occ_head(pb)
             pred_bev = fused.reshape(bs, c, h * w).permute(0, 2, 1)
         elif self.use_oarwm:
             # Fail loudly: MHST without a mask source would silently produce
@@ -449,6 +514,23 @@ class ResWorldHead(BaseModule):
             raise ValueError(
                 "use_oarwm=True but osz_mask is None — MHST requires a "
                 "mask source (use_osz_midas or use_osz_rcsample).")
+
+        risk_field = None
+        if self.use_risk_field and mhst_aux is not None and osz_mask is not None:
+            # Stage-4 risk field: semantic-agnostic proxy from the MHST aux
+            # (pi / sigma / delta), grid-aligned with the BEV feature. No
+            # learnable parameters — a pure function of the distribution.
+            if osz_mask.dim() != 4:
+                raise ValueError(
+                    f"osz_mask must be (B, 3, H, W), got "
+                    f"{tuple(osz_mask.shape)}")
+            rf_mask = osz_mask.to(device=device, dtype=pred_bev.dtype)
+            if rf_mask.shape[-2:] != (h, w):
+                rf_mask = F.interpolate(
+                    rf_mask, size=(h, w), mode="nearest")
+            risk_field = build_risk_field(
+                mhst_aux['pi'], mhst_aux['sigma'], mhst_aux['delta'],
+                rf_mask, beta=self.risk_beta, w_sigma=self.risk_w_sigma)
 
         way_point = self.col_attn(
                 query=way_point,
@@ -483,6 +565,14 @@ class ResWorldHead(BaseModule):
             # Stage-3 aux outputs (pi / sigma / delta), consumed by the
             # Stage-6 losses (L_occ_halluc / L_div / L_uncertainty).
             outs['mhst'] = mhst_aux
+        if risk_field is not None:
+            # Stage-4 risk field [R~_exp, R~_worst] (B, 2, H, W), consumed
+            # by the Stage-5 planner (Minimax -> worst, CVaR -> exp).
+            outs['risk_field'] = risk_field
+        if gt_bev_next is not None:
+            # Next-frame exposure ground truth (current ego frame), used by
+            # the Stage-6 losses (L_occ_halluc / L_uncertainty).
+            outs['gt_bev_next'] = gt_bev_next
 
         return outs
     
@@ -529,17 +619,105 @@ class ResWorldHead(BaseModule):
         loss_dict['loss_plan_reg'] = loss_plan_l1
         loss_dict['loss_plan_reg_init'] = loss_plan_l1_init
 
-        # Stage-3 placeholder: keep sigma_net in the graph until the Stage-6
-        # calibration loss (L_uncertainty) replaces it. Without any term the
-        # sigma_net parameters never receive grad -> DDP unused-parameter
-        # failure under find_unused_parameters=False. Weight is tiny so it
-        # does not perturb the planning loss.
+        # ---- Stage-3/4 related losses (design doc §6.2/6.2b/6.3/6.4) ----
         mhst = preds_dicts.get('mhst')
         if mhst is not None:
-            sigma = mhst['sigma']
-            loss_dict['loss_mhst_sigma'] = (
-                sigma.mean() * self.mhst_sigma_reg_weight)
+            pi = mhst['pi']               # (B, K, H, W)
+            sigma = mhst['sigma']         # (B, 1, H, W)
+            delta = mhst['delta']         # (B, K, C, H, W)
+            mask = mhst['mask']           # (B, 1, H, W) osz_eye
+            pb = mhst['pred_bev_4d']      # (B, C, H, W) un-fused pred_bev
+
+            occ_mask = mask > 0
+            n_occ = occ_mask.float().sum().clamp(min=1.0)
+
+            # 6.3 L_div: maximise pairwise separation of hypothesis residuals.
+            if self.loss_div_weight > 0 and delta.shape[1] > 1:
+                pair_d2 = []
+                for k1 in range(delta.shape[1]):
+                    for k2 in range(k1 + 1, delta.shape[1]):
+                        pair_d2.append(
+                            (delta[:, k1] - delta[:, k2]).pow(2).mean())
+                loss_dict['loss_div'] = (
+                    -torch.stack(pair_d2).mean() * self.loss_div_weight)
+
+            gt_next = preds_dicts.get('gt_bev_next')   # (B, C, H, W)
+            if gt_next is not None:
+                # exposure error per cell (mean over C), used by 6.4
+                b_hat = pb + (pi.unsqueeze(2) * delta).sum(dim=1)
+                e2 = (b_hat - gt_next).pow(2).mean(dim=1, keepdim=True)
+
+                # 6.2 L_occ_halluc: negative log mixture likelihood over the
+                # occluded cells (EM-style fit of pi / delta / sigma).
+                if self.loss_occ_halluc_weight > 0:
+                    b_k = pb.unsqueeze(1) + delta         # (B,K,C,H,W)
+                    diff2 = (b_k - gt_next.unsqueeze(1)).pow(2).mean(dim=2)
+                    var = sigma + 1e-6
+                    log_p = -0.5 * (diff2 / var +
+                                    torch.log(var) +
+                                    log(2 * pi))
+                    log_mix = torch.logsumexp(
+                        log_p + torch.log(pi.clamp(min=1e-12)), dim=1)
+                    loss_dict['loss_occ_halluc'] = (
+                        -(log_mix * occ_mask.float()).sum() / n_occ
+                        * self.loss_occ_halluc_weight)
+
+                # 6.4 L_uncertainty: calibrate sigma against exposure error.
+                if self.loss_uncertainty_weight > 0:
+                    loss_dict['loss_uncertainty'] = (
+                        ((sigma - e2).abs() * occ_mask.float()).sum() / n_occ
+                        * self.loss_uncertainty_weight)
+
+            # 6.2b L_occ_gt: BCE of the occupancy head against rasterised
+            # detection-box BEV occupancy (occluded cells only).
+            if self.loss_occ_gt_weight > 0 and hasattr(self, 'occ_head') \
+                    and 's_occ' in mhst:
+                s_occ = mhst['s_occ']     # (B, 1, H, W)
+                occ_gt = self._rasterise_boxes_bev(
+                    gt_bboxes_list, img_metas, device=s_occ.device)
+                loss_dict['loss_occ_gt'] = (
+                    F.binary_cross_entropy_with_logits(
+                        s_occ, occ_gt, reduction='none') * occ_mask.float()
+                ).sum() / n_occ * self.loss_occ_gt_weight
 
         return loss_dict
+
+    def _rasterise_boxes_bev(self, gt_bboxes_list, img_metas, device):
+        """Rasterise LiDAR-frame 3D boxes into a binary BEV occupancy map
+        (B, 1, H, W) on the head's BEV grid. Axis-aligned bottom-rectangle
+        approximation via the box corners' bounding box, transformed to the
+        ego frame with ``img_metas[..]['lidar2ego']`` when available."""
+        B = len(gt_bboxes_list)
+        occ = torch.zeros(B, 1, self.bev_h, self.bev_w, device=device)
+        x_min, y_min = float(self.grid_min[0]), float(self.grid_min[1])
+        x_max, y_max = float(self.grid_max[0]), float(self.grid_max[1])
+        for b in range(B):
+            boxes = gt_bboxes_list[b]
+            if boxes is None or len(boxes) == 0:
+                continue
+            corners = boxes.corners[:, :4, :2]     # (N,4,2) bottom rect, LiDAR
+            corners = corners.to(device=device).float()
+            l2e = None
+            if img_metas is not None and len(img_metas) > b:
+                l2e = img_metas[b].get('lidar2ego')
+            if l2e is not None:
+                l2e_t = torch.as_tensor(
+                    l2e, dtype=corners.dtype, device=corners.device)
+                ones = torch.ones_like(corners[..., :1])
+                ch = torch.cat([corners, ones], dim=-1)        # (N,4,3)
+                corners = (l2e_t @ ch.transpose(-1, -2)
+                           ).transpose(-1, -2)[..., :2]        # (N,4,2) ego
+            xs, ys = corners[..., 0], corners[..., 1]
+            x0 = ((xs.min(-1).values - x_min) / (x_max - x_min)
+                  * self.bev_w).floor().long().clamp(0, self.bev_w - 1)
+            x1 = ((xs.max(-1).values - x_min) / (x_max - x_min)
+                  * self.bev_w).ceil().long().clamp(1, self.bev_w)
+            y0 = ((y_max - ys.max(-1).values) / (y_max - y_min)
+                  * self.bev_h).floor().long().clamp(0, self.bev_h - 1)
+            y1 = ((y_max - ys.min(-1).values) / (y_max - y_min)
+                  * self.bev_h).ceil().long().clamp(1, self.bev_h)
+            for i in range(len(boxes)):
+                occ[b, 0, y0[i]:y1[i], x0[i]:x1[i]] = 1.0
+        return occ
 
 
