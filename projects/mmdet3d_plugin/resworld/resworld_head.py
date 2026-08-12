@@ -1,4 +1,5 @@
 import copy
+import math
 from math import pi, cos, sin, log
 import os
 import torch
@@ -655,7 +656,7 @@ class ResWorldHead(BaseModule):
                     var = sigma + 1e-6
                     log_p = -0.5 * (diff2 / var +
                                     torch.log(var) +
-                                    log(2 * pi))
+                                    log(2 * math.pi))
                     log_mix = torch.logsumexp(
                         log_p + torch.log(pi.clamp(min=1e-12)), dim=1)
                     loss_dict['loss_occ_halluc'] = (
