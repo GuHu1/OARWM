@@ -636,7 +636,8 @@ class ResWorldHead(BaseModule):
             # (occluded cells, normalised by the occluded residual energy so
             # the term is scale-free and does not dominate the total loss).
             if self.loss_div_weight > 0 and delta.shape[1] > 1:
-                m = occ_mask.float()
+                # (B,1,1,H,W): broadcastable against delta (B,K,C,H,W)
+                m = occ_mask.float().unsqueeze(2)
                 base = (delta.pow(2) * m).sum() / n_occ + 1e-6
                 pair_d2 = []
                 for k1 in range(delta.shape[1]):
@@ -664,8 +665,9 @@ class ResWorldHead(BaseModule):
                                     log(2 * math.pi))
                     log_mix = torch.logsumexp(
                         log_p + torch.log(pi.clamp(min=1e-12)), dim=1)
+                    # occ_mask.squeeze(1) -> (B,H,W) matches log_mix
                     loss_dict['loss_occ_halluc'] = (
-                        -(log_mix * occ_mask.float()).sum() / n_occ
+                        -(log_mix * occ_mask.float().squeeze(1)).sum() / n_occ
                         * self.loss_occ_halluc_weight)
 
                 # 6.4 L_uncertainty: calibrate sigma against exposure error.
