@@ -632,21 +632,20 @@ class ResWorldHead(BaseModule):
             occ_mask = mask > 0
             n_occ = occ_mask.float().sum().clamp(min=1.0)
 
-            # 6.3 L_div: maximise pairwise separation of hypothesis residuals
-            # (occluded cells, normalised by the occluded residual energy so
-            # the term is scale-free and does not dominate the total loss).
+            # 6.3 L_div: minimise pairwise cosine similarity of the hypothesis
+            # residuals (maximise separation). Unit-normalised -> bounded in
+            # [-1,1] and gradient-stable (no exploding d2/base ratio).
             if self.loss_div_weight > 0 and delta.shape[1] > 1:
-                # (B,1,1,H,W): broadcastable against delta (B,K,C,H,W)
-                m = occ_mask.float().unsqueeze(2)
-                base = (delta.pow(2) * m).sum() / n_occ + 1e-6
-                pair_d2 = []
+                flat = delta.flatten(2)                # (B,K,D)
+                unit = flat / flat.norm(
+                    dim=2, keepdim=True).clamp(min=1e-6)   # (B,K,D)
+                cos_pairs = []
                 for k1 in range(delta.shape[1]):
                     for k2 in range(k1 + 1, delta.shape[1]):
-                        d2 = ((delta[:, k1] - delta[:, k2]).pow(2)
-                              * m).sum() / n_occ
-                        pair_d2.append(d2 / base)
+                        cos_pairs.append(
+                            (unit[:, k1] * unit[:, k2]).sum(dim=1).mean())
                 loss_dict['loss_div'] = (
-                    -torch.stack(pair_d2).mean() * self.loss_div_weight)
+                    torch.stack(cos_pairs).mean() * self.loss_div_weight)
 
             gt_next = preds_dicts.get('gt_bev_next')   # (B, C, H, W)
             if gt_next is not None:
