@@ -21,6 +21,12 @@ use_osz_midas = False
 use_osz_rcsample = True
 assert not (use_osz_midas and use_osz_rcsample), \
     'use_osz_midas and use_osz_rcsample are mutually exclusive'
+# Drivable-area constraint for the ONLINE mask: the dataset loads the
+# HD-map drivable_mask from the offline {token}.npz (OSZ export) and the
+# online geometry intersects with it. OFF until data/osz is exported with
+# --use_drivable — otherwise samples mix constrained/unconstrained masks
+# (data conflict during the export window). See ISSUE.md P1-3.
+use_osz_drivable = False
 # Injection gate for the head: True iff any mask source is active.
 use_osz = use_osz_midas or use_osz_rcsample
 
@@ -305,7 +311,7 @@ train_pipeline = [
          keys=['gt_bboxes_3d', 'gt_labels_3d', 'img_inputs', 'ego_his_trajs', 'gt_depth', 'can_bus',
                'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels']
          + (['osz_mask'] if use_osz_midas else [])
-         + (['drivable_mask'] if use_osz_rcsample else [])
+         + (['drivable_mask'] if use_osz_rcsample and use_osz_drivable else [])
          + (['next_img_inputs'] if use_osz else []))
 ]
 
@@ -333,7 +339,7 @@ test_pipeline = [
                        'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd',
                        'ego_lcf_feat', 'gt_attr_labels']
                  + (['osz_mask'] if use_osz_midas else [])
-                 + (['drivable_mask'] if use_osz_rcsample else []))])
+                 + (['drivable_mask'] if use_osz_rcsample and use_osz_drivable else []))])
 ]
 
 data = dict(
@@ -358,6 +364,7 @@ data = dict(
         osz_dir='data/osz/',
         use_osz=use_osz_midas,
         use_osz_rcsample=use_osz_rcsample,
+        use_osz_drivable=use_osz_drivable,
         use_next=use_osz,
         # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
         # and box_type_3d='Depth' in sunrgbd and scannet dataset.
@@ -373,6 +380,7 @@ data = dict(
              osz_dir='data/osz/',
              use_osz=use_osz_midas,
              use_osz_rcsample=use_osz_rcsample,
+             use_osz_drivable=use_osz_drivable,
              use_next=use_osz,
              map_classes=map_classes,
              map_ann_file=data_root + 'nuscenes_map_anns_val.json',

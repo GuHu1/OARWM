@@ -86,10 +86,12 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
         self.use_osz = kwargs.pop('use_osz', False)
         self.osz_dir = kwargs.pop('osz_dir', None)
         # Stage-2 OSZ, online source: the model computes masks from its own
-        # RCSample depth; the dataset only supplies the HD-map drivable mask
-        # (from the offline npz) so the online mask stays inside the
-        # drivable area (ISSUE.md P1-3).
+        # RCSample depth; the dataset optionally supplies the HD-map
+        # drivable mask (from the offline npz) so the online mask stays
+        # inside the drivable area (ISSUE.md P1-3). OFF until the npz export
+        # finishes, to avoid mixed constrained/unconstrained samples.
         self.use_osz_rcsample = kwargs.pop('use_osz_rcsample', False)
+        self.use_osz_drivable = kwargs.pop('use_osz_drivable', False)
         # Next-frame supervision channel: independent of the mask source
         # (both midas and rcsample need the exposure ground truth).
         self.use_next = kwargs.pop('use_next', False)
@@ -149,7 +151,7 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
             # falls back to all-zeros (= identity for the fusion).
             input_dict['osz_mask'] = _load_osz_mask(
                 self.osz_dir, info['token'])
-        if self.use_osz_rcsample:
+        if self.use_osz_rcsample and self.use_osz_drivable:
             # Drivable-area constraint for the online mask (optional; None
             # when the offline npz is missing).
             input_dict['drivable_mask'] = _load_drivable_mask(

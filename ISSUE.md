@@ -96,7 +96,9 @@
   npz 加载 `drivable_mask`（与深度源无关），`build_osz_mask_online` 中
   `osz &= drivable`，路外建筑/设施不再计入遮挡（P0-1 的掩码过曝源头）。
   改动：`torch_pipeline.py`/`resworld.py`/`nuscenes_resworld_dataset.py`/`resworld_config.py`
-- **状态**：`fixed-pending-verify`（待新日志确认 occ_frac 回落到合理值）
+- **状态**：`on-hold`——约束实现完成但**默认关闭**（`use_osz_drivable=False`），
+  避免 midas npz 导出窗口期的样本间数据冲突；待 `data/osz` 用 `--use_drivable`
+  导出完成后置 True 再验证 `occ_frac` 回落
 
 ---
 
