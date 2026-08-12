@@ -26,22 +26,19 @@
 ## P0-1 [open] Stage-5 风险损失与 L2 回归目标对抗，且 `‖ΔB‖` 量级不可控
 
 - **位置**：`resworld_head.py` loss（`loss_plan_risk` / `loss_plan_cvar` / `loss_plan_info`）
-- **现象（预期）**：轨迹 L2 / 碰撞率劣于基线；`loss_plan_risk` 量级可能 ≥ `loss_plan_reg`
-- **原因**：
-  - 风险损失梯度直接作用于 `ego_fut_preds`，鼓励轨迹**避开高风险格**；而 GT 轨迹常
-    穿过遮挡区/路口/卡车后方（恰是 `M=1` 且 `‖ΔB‖` 大的格）→ 与 `loss_plan_reg`
-    （L1 × **10.0**）目标**相反**。
-  - `risk = w_σ·σ·‖ΔB‖·M·boost`，其中 `‖ΔB‖` 是 **256 维特征残差 L2 范数**：
-    无归一化、无上界（随机初始化 ~0.5，训练中可达十几）；σ ∈ [0.1, ~0.8+]；
-    boost = (1+β·U·M)(1+γ·s_occ·M) ∈ [1, 6]。量级估算 O(0.3) ~ O(20+)，
-    与 L1×10（~1-10）同量级甚至更大，且随训练漂移。
+- **现象（已由 [DIAG] 实证，2026-08-13 iter~100-200）**：
+  - `rf_mean = 6-12`、`rf_occ = 27-52`——风险场量级是 `loss_plan_reg`(2.9) 的 **3~10 倍**
+  - 根因链：`L_uncertainty` 把 σ 校准到特征空间误差量级（e² 大 → σ 大）→
+    `risk = σ·‖ΔB‖·boost` 直接把 σ 当乘法因子 → 风险场爆炸
+  - `r_cmd = 0`（轨迹尚短未及遮挡区）——**一旦轨迹变长穿过遮挡区，
+    `loss_plan_risk` 将立即以 ~10-50 量级主导训练，把轨迹强拉离 GT**
 - **建议**：
-  1. 观察日志：`loss_plan_risk/cvar/info` vs `loss_plan_reg` 相对量级；`grad_norm`
-     是否频繁触顶（35 裁剪）。
-  2. 最小改法：risk 三项权重降到 0.1 量级；或前 2-3 epoch 关闭 `use_risk_plan`
-     （warmup，等 MHST 与掩码质量稳定）。
-  3. 给 `‖ΔB‖` 做移动平均归一化，抑制量级漂移。
-- **状态**：`open`（待日志确认）
+  1. **σ 量级传染已修复**（2026-08-13，B 方案）：`build_risk_field` 中 σ 改用
+     `(σ/(1+σ)).detach()`（有界 [0,1) + 阻断梯度传染）——σ 只由校准损失负责，
+     风险场仅消费其相对量级
+  2. risk 三项权重降到 0.1 量级；或前 2-3 epoch 关闭 `use_risk_plan`（warmup）
+  3. 给 `‖ΔB‖` 做移动平均归一化，抑制量级漂移
+- **状态**：`partially fixed`（σ 传染已断；待新日志确认 rf 量级回落到 ~1 量级）
 
 ---
 
@@ -89,12 +86,17 @@
 ## P1-3 [open] 在线掩码（`use_osz_rcsample=True`）质量依赖模型自身深度
 
 - **位置**：`resworld.py` `forward_train`（`build_osz_mask_online`，no_grad）
-- **现象（预期）**：早期掩码误报/漏报 → Stage 2/3/4/5 全部被带偏
+- **现象（已由 [DIAG] 实证，2026-08-13）**：`occ_frac = 0.42-0.48`——遮挡格占比接近
+  一半，明显异常（正常城市场景应远低于此）。RCSample 深度低估 → 射线投射大面积误报遮挡
 - **原因**：主配置掩码由**模型自己的 RCSample 深度**生成；深度损失权重仅 **0.1**，
   训练早期深度不准 → 掩码不可靠。离线 MiDaS 掩码（LiDAR 对齐）质量稳定得多。
 - **建议**：warmup 期用离线 MiDaS 掩码（`use_osz_midas`）或提高深度损失权重；
   或在线掩码加"置信度门控"（深度不确定区域掩码置零）。
-- **状态**：`open`
+- **修复（2026-08-13）**：在线掩码生成已加 **HD-map 可行驶区域约束**——数据集从离线
+  npz 加载 `drivable_mask`（与深度源无关），`build_osz_mask_online` 中
+  `osz &= drivable`，路外建筑/设施不再计入遮挡（P0-1 的掩码过曝源头）。
+  改动：`torch_pipeline.py`/`resworld.py`/`nuscenes_resworld_dataset.py`/`resworld_config.py`
+- **状态**：`fixed-pending-verify`（待新日志确认 occ_frac 回落到合理值）
 
 ---
 

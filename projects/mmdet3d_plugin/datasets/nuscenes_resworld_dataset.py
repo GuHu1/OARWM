@@ -9,6 +9,34 @@ from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
 from .nuscenes_vad_dataset import VADCustomNuScenesDataset
 
 @functools.lru_cache(maxsize=2048)
+def _load_drivable_mask(osz_dir: Optional[str], token: str) -> Optional[np.ndarray]:
+    """Load the HD-map drivable mask from the offline npz.
+
+    Returns a (200, 200) bool mask (grid-aligned, see OSZ/config.py), or
+    None when no npz / no ``drivable_mask`` channel exists — the online
+    (rcsample) mask then skips the drivable constraint. The drivable mask
+    depends only on the HD map and ego pose, so it is valid for ANY depth
+    source (midas / rcsample / lidar).
+    """
+    if not osz_dir:
+        return None
+    path = os.path.join(osz_dir, f"{token}.npz")
+    if not os.path.exists(path):
+        return None
+    with np.load(path) as data:
+        if "drivable_mask" not in data:
+            return None
+        m = data["drivable_mask"].astype(np.float32)
+    if m.shape != (200, 200):
+        raise ValueError(
+            f"drivable_mask for {token} has shape {m.shape}, expected "
+            "(200, 200) — resync OSZ/config.py with grid_config."
+        )
+    m.flags.writeable = False
+    return m
+
+
+@functools.lru_cache(maxsize=2048)
 def _load_osz_mask(osz_dir: Optional[str], token: str) -> np.ndarray:
     """Load the precomputed OSZ mask for a sample token.
 
@@ -57,6 +85,11 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
         # both sources off).
         self.use_osz = kwargs.pop('use_osz', False)
         self.osz_dir = kwargs.pop('osz_dir', None)
+        # Stage-2 OSZ, online source: the model computes masks from its own
+        # RCSample depth; the dataset only supplies the HD-map drivable mask
+        # (from the offline npz) so the online mask stays inside the
+        # drivable area (ISSUE.md P1-3).
+        self.use_osz_rcsample = kwargs.pop('use_osz_rcsample', False)
         # Next-frame supervision channel: independent of the mask source
         # (both midas and rcsample need the exposure ground truth).
         self.use_next = kwargs.pop('use_next', False)
@@ -115,6 +148,11 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
             # Stage-2 OSZ masks (see OSZ/export_osz_dataset.py). Missing npz
             # falls back to all-zeros (= identity for the fusion).
             input_dict['osz_mask'] = _load_osz_mask(
+                self.osz_dir, info['token'])
+        if self.use_osz_rcsample:
+            # Drivable-area constraint for the online mask (optional; None
+            # when the offline npz is missing).
+            input_dict['drivable_mask'] = _load_drivable_mask(
                 self.osz_dir, info['token'])
         if 'occ_path' in info:
             input_dict['occ_gt_path'] = info['occ_path']

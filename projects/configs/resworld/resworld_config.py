@@ -305,6 +305,7 @@ train_pipeline = [
          keys=['gt_bboxes_3d', 'gt_labels_3d', 'img_inputs', 'ego_his_trajs', 'gt_depth', 'can_bus',
                'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd', 'ego_lcf_feat', 'gt_attr_labels']
          + (['osz_mask'] if use_osz_midas else [])
+         + (['drivable_mask'] if use_osz_rcsample else [])
          + (['next_img_inputs'] if use_osz else []))
 ]
 
@@ -331,7 +332,8 @@ test_pipeline = [
                  keys=['img_inputs', 'gt_bboxes_3d', 'gt_labels_3d', 'fut_valid_flag', 'can_bus',
                        'ego_his_trajs', 'ego_fut_trajs', 'ego_fut_masks', 'ego_fut_cmd',
                        'ego_lcf_feat', 'gt_attr_labels']
-                 + (['osz_mask'] if use_osz_midas else []))])
+                 + (['osz_mask'] if use_osz_midas else [])
+                 + (['drivable_mask'] if use_osz_rcsample else []))])
 ]
 
 data = dict(
@@ -355,6 +357,7 @@ data = dict(
         # back to all-zeros = identity.
         osz_dir='data/osz/',
         use_osz=use_osz_midas,
+        use_osz_rcsample=use_osz_rcsample,
         use_next=use_osz,
         # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
         # and box_type_3d='Depth' in sunrgbd and scannet dataset.
@@ -369,6 +372,7 @@ data = dict(
              classes=class_names, modality=input_modality, samples_per_gpu=1,
              osz_dir='data/osz/',
              use_osz=use_osz_midas,
+             use_osz_rcsample=use_osz_rcsample,
              use_next=use_osz,
              map_classes=map_classes,
              map_ann_file=data_root + 'nuscenes_map_anns_val.json',
@@ -424,6 +428,11 @@ checkpoint_config = dict(interval=1, max_keep_ckpts=total_epochs)
 
 custom_hooks = [
     dict(type='CustomSetEpochInfoHook'),
+    dict(
+        type='DiagLoggerHook',
+        interval=log_config['interval'],
+        priority='LOW',
+    ),
     dict(
         type='MEGVIIEMAHook',
         init_updates=10560,

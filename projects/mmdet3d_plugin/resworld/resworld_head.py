@@ -131,7 +131,15 @@ def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0,
     B, K, C, H, W = delta.shape
     m = mask[:, :1]                                   # (B,1,H,W) osz_eye
     d_norm = delta.norm(dim=2)                        # (B,K,H,W) ||dB^k||_2
-    r_k = w_sigma * sigma * d_norm * m                # (B,K,H,W)
+    # sigma's absolute scale is calibrated by L_uncertainty to the
+    # feature-space error (can reach tens), so multiplying it straight into
+    # the risk explodes the field (ISSUE.md P0-1; DIAG showed rf_occ≈30-50).
+    # Use the bounded transform sigma/(1+sigma) ∈ [0,1) to keep the relative
+    # ordering, and detach so risk never backprops into sigma — sigma stays
+    # the calibration loss' contract, the risk field only consumes its
+    # relative magnitude.
+    sigma_risk = (sigma / (1.0 + sigma)).detach()
+    r_k = w_sigma * sigma_risk * d_norm * m           # (B,K,H,W)
     r_exp = (pi * r_k).sum(dim=1)                     # (B,H,W)
     r_worst = r_k.max(dim=1).values                   # (B,H,W)
     log_k = log(max(K, 2))                            # K=1 -> U=0 (pi=1, H=0)
@@ -778,19 +786,21 @@ class ResWorldHead(BaseModule):
                     -info * self.loss_plan_info_weight)
 
         # ---- [DIAG] temporary risk-planning diagnostics (remove after tuning) ----
-        # Prints per-iter occlusion coverage and trajectory risk so the
-        # Stage-5 activation and online-mask quality can be monitored during
-        # early training (ISSUE.md P0-1 / P1-3).
+        # Caches a per-iter diagnostic line; DiagLoggerHook prints it at the
+        # same cadence as the TextLoggerHook loss output (log_config interval,
+        # see projects/mmdet3d_plugin/resworld/hooks/custom_hooks.py). Tracks
+        # Stage-5 activation and online-mask quality (ISSUE.md P0-1 / P1-3).
         if self.use_risk_plan and risk_field is not None and mhst is not None:
-            msk = mhst['mask'] > 0                       # (B,1,H,W) osz_eye
-            occ_frac = msk.float().mean().item()         # occluded-cell fraction
-            rf_mean = risk_field.mean().item()           # overall risk mean
+            msk = mhst['mask'] > 0                   # (B,1,H,W) osz_eye
+            occ_frac = msk.float().mean().item()     # occluded-cell fraction
+            rf_mean = risk_field.mean().item()       # overall risk mean
             rf_occ = ((risk_field * msk).sum()
                       / msk.float().sum().clamp(min=1.0)).item()
-            rc = r_cmd.detach()                          # (B,T) commanded risk
-            print(f"[DIAG] occ_frac={occ_frac:.3f} rf_mean={rf_mean:.5f} "
-                  f"rf_occ={rf_occ:.5f} r_cmd_mean={rc.mean().item():.5f} "
-                  f"r_cmd_pos_frac={(rc > 0).float().mean().item():.3f}")
+            rc = r_cmd.detach()                      # (B,T) commanded risk
+            self._diag_msg = (
+                f"[DIAG] occ_frac={occ_frac:.3f} rf_mean={rf_mean:.5f} "
+                f"rf_occ={rf_occ:.5f} r_cmd_mean={rc.mean().item():.5f} "
+                f"r_cmd_pos_frac={(rc > 0).float().mean().item():.3f}")
 
         return loss_dict
 

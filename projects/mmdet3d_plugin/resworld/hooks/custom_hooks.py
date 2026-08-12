@@ -24,3 +24,30 @@ class CustomSetEpochInfoHook(Hook):
             model = model.module
         model.set_epoch(epoch)
 
+
+@HOOKS.register_module()
+class DiagLoggerHook(Hook):
+    """Print the head's cached [DIAG] line on the TextLoggerHook cadence.
+
+    Uses the same every_n_iters(runner, interval) gate as TextLoggerHook
+    (log_config.interval in resworld_config.py), so the diagnostic aligns
+    with the per-100-iter loss output instead of drifting across epochs
+    (3517 iters/epoch does not divide evenly by 100). Only rank 0 prints,
+    via runner.logger so the line lands in the same training log.
+    """
+
+    def __init__(self, interval=100):
+        self.interval = interval
+
+    def after_train_iter(self, runner):
+        if not self.every_n_iters(runner, self.interval):
+            return
+        if runner.rank != 0:
+            return
+        model = runner.model
+        if is_module_wrapper(model):
+            model = model.module
+        msg = getattr(model.pts_bbox_head, '_diag_msg', None)
+        if msg:
+            runner.logger.info(msg)
+

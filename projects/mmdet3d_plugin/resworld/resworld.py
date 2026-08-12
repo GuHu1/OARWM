@@ -56,7 +56,8 @@ class ResWorld(BEVDepth4D):
             bev_next = self.bev_encoder(bev_next)
         return bev_next  # (B, C, H, W) in the current ego frame
 
-    def build_osz_mask_online(self, depth, img_inputs, lidar_depth=None):
+    def build_osz_mask_online(self, depth, img_inputs, lidar_depth=None,
+                              drivable_mask=None):
         """Compute the OSZ mask from the model's own RCSample depth.
 
         ``depth`` is the key-frame depth distribution from the view
@@ -64,6 +65,8 @@ class ResWorld(BEVDepth4D):
         the BEV feature map (200x200, see OSZ/config.py) and channel-ordered
         like the offline npz: (osz_eye, osz_ground, semi). It is detached
         downstream (discrete geometry) and used as a conditioning input.
+        ``drivable_mask`` (optional, from the dataset's offline npz) keeps
+        shadows inside the HD-map drivable area only.
         """
         from OSZ.modules.torch_pipeline import build_osz_mask_online as _build
         if self._osz_bin_center is None:
@@ -78,6 +81,7 @@ class ResWorld(BEVDepth4D):
             intrins[0], post_rots[0], post_trans[0], sensor2keyegos[0],
             device=depth.device,
             lidar_depth=lidar_depth,
+            drivable_mask=drivable_mask,
         )
 
     def extract_img_feat(self,
@@ -179,7 +183,9 @@ class ResWorld(BEVDepth4D):
             # RCSample returns the depth as a per-scale list ([tensor] for
             # scale_num=1); the online mask needs the single main-scale
             # softmax distribution.
-            kwargs['osz_mask'] = self.build_osz_mask_online(depth[0], img_inputs)
+            kwargs['osz_mask'] = self.build_osz_mask_online(
+                depth[0], img_inputs,
+                drivable_mask=kwargs.get('drivable_mask'))
         bev_inputs = [img_feats[0], kwargs['can_bus']]
         # Next-frame exposure ground truth (independent supervision channel
         # for L_occ_halluc / L_uncertainty): encoded from the pipeline's

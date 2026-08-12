@@ -375,6 +375,7 @@ def build_osz_mask_online(
     sensor2ego: "torch.Tensor",   # (B, N, 4, 4) camera -> current ego
     device: str = "cuda",
     lidar_depth: Optional["torch.Tensor"] = None,  # (B, N, 256, 704) optional
+    drivable_mask: Optional["torch.Tensor"] = None,  # (B, 200, 200) bool, optional
     in_size: tuple = (256, 704),
     z_min: float = cfg.Z_MIN_M,
     z_max: float = cfg.Z_MAX_M,
@@ -462,6 +463,14 @@ def build_osz_mask_online(
             osz_g, osz_e = cast_osz_height_aware_torch(
                 fused, grid, observer_height=observer_height
             )
+            # Drivable-area constraint (HD-map mask from the dataset, offline
+            # npz): keep shadows only where the ego can actually drive. The
+            # raw ray casting also shadows buildings/off-road clutter, which
+            # inflates occ_frac well beyond real occlusion (ISSUE.md P1-3).
+            if drivable_mask is not None:
+                dr = drivable_mask[b].to(device=device).bool()
+                osz_g &= dr
+                osz_e &= dr
             semi = osz_g & ~osz_e
             masks.append(
                 torch.stack([osz_e, osz_g, semi], dim=0).float()
