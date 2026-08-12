@@ -777,6 +777,21 @@ class ResWorldHead(BaseModule):
                 loss_dict['loss_plan_info'] = (
                     -info * self.loss_plan_info_weight)
 
+        # ---- [DIAG] temporary risk-planning diagnostics (remove after tuning) ----
+        # Prints per-iter occlusion coverage and trajectory risk so the
+        # Stage-5 activation and online-mask quality can be monitored during
+        # early training (ISSUE.md P0-1 / P1-3).
+        if self.use_risk_plan and risk_field is not None and mhst is not None:
+            msk = mhst['mask'] > 0                       # (B,1,H,W) osz_eye
+            occ_frac = msk.float().mean().item()         # occluded-cell fraction
+            rf_mean = risk_field.mean().item()           # overall risk mean
+            rf_occ = ((risk_field * msk).sum()
+                      / msk.float().sum().clamp(min=1.0)).item()
+            rc = r_cmd.detach()                          # (B,T) commanded risk
+            print(f"[DIAG] occ_frac={occ_frac:.3f} rf_mean={rf_mean:.5f} "
+                  f"rf_occ={rf_occ:.5f} r_cmd_mean={rc.mean().item():.5f} "
+                  f"r_cmd_pos_frac={(rc > 0).float().mean().item():.3f}")
+
         return loss_dict
 
     def _rasterise_boxes_bev(self, gt_bboxes_list, img_metas, device):
