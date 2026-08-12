@@ -696,7 +696,10 @@ class ResWorldHead(BaseModule):
             boxes = gt_bboxes_list[b]
             if boxes is None or len(boxes) == 0:
                 continue
-            corners = boxes.corners[:, :4, :2]     # (N,4,2) bottom rect, LiDAR
+            c = boxes.corners
+            if c.dim() == 2:
+                c = c.view(-1, 8, 3)               # defensive: flattened
+            corners = c[:, :4, :2]                 # (N,4,2) bottom rect, LiDAR
             corners = corners.to(device=device).float()
             l2e = None
             if img_metas is not None and len(img_metas) > b:
@@ -704,10 +707,14 @@ class ResWorldHead(BaseModule):
             if l2e is not None:
                 l2e_t = torch.as_tensor(
                     l2e, dtype=corners.dtype, device=corners.device)
-                ones = torch.ones_like(corners[..., :1])
-                ch = torch.cat([corners, ones], dim=-1)        # (N,4,3)
-                corners = (l2e_t @ ch.transpose(-1, -2)
-                           ).transpose(-1, -2)[..., :2]        # (N,4,2) ego
+                zero = torch.zeros_like(corners[..., :1])
+                one = torch.ones_like(corners[..., :1])
+                # homogeneous (x, y, 0, 1): (N,4,4)
+                ch = torch.cat([corners[..., :1], corners[..., 1:2],
+                                zero, one], dim=-1)
+                # explicit einsum: 'ij,bkj->bki' — l2e (4,4) per point
+                corners = torch.einsum(
+                    'ij,bkj->bki', l2e_t, ch)[..., :2]   # (N,4,2) ego
             xs, ys = corners[..., 0], corners[..., 1]
             x0 = ((xs.min(-1).values - x_min) / (x_max - x_min)
                   * self.bev_w).floor().long().clamp(0, self.bev_w - 1)
