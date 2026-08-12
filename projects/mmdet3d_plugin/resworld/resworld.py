@@ -53,6 +53,11 @@ class ResWorld(BEVDepth4D):
                        bda_next, mlp_input)
         with torch.no_grad():
             bev_next, _ = self.prepare_bev_feat(*inputs_next)
+            # prepare_bev_feat returns the RCSample grid (200x200); the main
+            # branch then passes through bev_encoder (downsample to 100x100)
+            # — the exposure ground truth must match the head's BEV feature
+            # resolution, so apply the same encoder here.
+            bev_next = self.bev_encoder(bev_next)
         return bev_next  # (B, C, H, W) in the current ego frame
 
     def build_osz_mask_online(self, depth, img_inputs, lidar_depth=None):
