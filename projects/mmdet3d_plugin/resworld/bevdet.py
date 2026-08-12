@@ -404,7 +404,6 @@ class BEVDet4D(BEVDet):
             return self.extract_img_feat_sequential(img, kwargs['feat_prev'])
         imgs, sensor2keyegos, ego2globals, intrins, post_rots, post_trans, \
         bda, _ = self.prepare_inputs(img)
-        """Extract features of images."""
         bev_feat_list = []
         depth_list = []
         key_frame = True  # back propagation for key frame only

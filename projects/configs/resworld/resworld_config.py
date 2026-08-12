@@ -51,6 +51,15 @@ loss_uncertainty_weight = 1.0    # σ calibration
 loss_occ_gt_weight = 1.0         # detection-box BEV occupancy BCE
 loss_occ_gt_pos_weight = 5.0     # BCE pos_weight (penalise missed occupancies)
 
+# --- Stage-5 risk-weighted planning (approach A: no candidate selection) ---
+use_risk_plan = True             # False = skip risk-weighted planning losses
+loss_plan_risk_weight = 1.0      # minimax-style mean step risk on the trajectory
+loss_plan_cvar_weight = 1.0      # CVaR of the step-risk tail
+loss_plan_info_weight = 0.5      # info gain (start-vs-end risk drop, active sensing)
+cvar_beta = 0.25                 # CVaR tail fraction of the trajectory steps
+assert (not use_risk_plan) or use_risk_field, \
+    'use_risk_plan (Stage 5) requires use_risk_field (Stage 4)'
+
 #
 plugin = True
 plugin_dir = 'projects/mmdet3d_plugin/'
@@ -193,6 +202,11 @@ model = dict(
         loss_uncertainty_weight=loss_uncertainty_weight,
         loss_occ_gt_weight=loss_occ_gt_weight,
         loss_occ_gt_pos_weight=loss_occ_gt_pos_weight,
+        use_risk_plan=use_risk_plan,
+        loss_plan_risk_weight=loss_plan_risk_weight,
+        loss_plan_cvar_weight=loss_plan_cvar_weight,
+        loss_plan_info_weight=loss_plan_info_weight,
+        cvar_beta=cvar_beta,
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,

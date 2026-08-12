@@ -1,12 +1,10 @@
 import os
 import random
 import functools
-from typing import Dict, List, Optional
+from typing import Optional
 
 import numpy as np
-import torch
 from mmdet.datasets import DATASETS
-from mmdet3d.datasets import NuScenesDataset
 from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
 from .nuscenes_vad_dataset import VADCustomNuScenesDataset
 
@@ -21,28 +19,25 @@ def _load_osz_mask(osz_dir: Optional[str], token: str) -> np.ndarray:
     or the npz is missing, so training stays strictly equivalent to the
     baseline without OSZ.
     """
-    if not osz_dir:
-        mask = np.zeros((3, 200, 200), dtype=np.float32)
-        mask.flags.writeable = False
-        return mask
-    path = os.path.join(osz_dir, f"{token}.npz")
-    if not os.path.exists(path):
-        mask = np.zeros((3, 200, 200), dtype=np.float32)
-        mask.flags.writeable = False
-        return mask
-    with np.load(path) as data:
-        mask = np.stack([
-            data["osz_eye"].astype(np.float32),
-            data["osz_ground"].astype(np.float32),
-            data["semi"].astype(np.float32),
-        ])
-    # Fail loudly on grid drift instead of silently misaligning the model.
-    if mask.shape != (3, 200, 200):
-        raise ValueError(
-            f"osz mask for {token} has shape {mask.shape}, expected "
-            "(3, 200, 200) — resync OSZ/config.py with ResWorld grid_config."
-        )
-    # Shared cache entries must be read-only: no downstream in-place writes.
+    if osz_dir:
+        path = os.path.join(osz_dir, f"{token}.npz")
+        if os.path.exists(path):
+            with np.load(path) as data:
+                mask = np.stack([
+                    data["osz_eye"].astype(np.float32),
+                    data["osz_ground"].astype(np.float32),
+                    data["semi"].astype(np.float32),
+                ])
+            # Fail loudly on grid drift instead of silently misaligning.
+            if mask.shape != (3, 200, 200):
+                raise ValueError(
+                    f"osz mask for {token} has shape {mask.shape}, expected "
+                    "(3, 200, 200) — resync OSZ/config.py with grid_config."
+                )
+            # Shared cache entries must be read-only: no in-place writes.
+            mask.flags.writeable = False
+            return mask
+    mask = np.zeros((3, 200, 200), dtype=np.float32)
     mask.flags.writeable = False
     return mask
 
@@ -253,8 +248,6 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
 
     def prepare_train_data(self, index):
 
-        data_queue = []
-
         # temporal aug
         prev_indexs_list = list(range(index-self.queue_length, index))
         random.shuffle(prev_indexs_list)
@@ -269,8 +262,6 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
             # be missing, leaving sigma_net without supervision (DDP unused-
             # parameter failure). Skip this sample.
             return None
-        frame_idx = input_dict['frame_idx']
-        scene_token = input_dict['scene_token']
         self.pre_pipeline(input_dict)
         example = self.pipeline(input_dict)
         example = self.vectormap_pipeline(example,input_dict)

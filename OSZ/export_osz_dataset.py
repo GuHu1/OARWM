@@ -134,10 +134,6 @@ def _get_estimator(
     return est
 
 
-def _load_frame(loader, token: str) -> dict:
-    return loader.build_frame_for_token(token)
-
-
 def _export_one(args: dict) -> tuple:
     """Export OSZ masks for one sample token. Returns (token, status)."""
     token = args["token"]
@@ -151,7 +147,7 @@ def _export_one(args: dict) -> tuple:
         dataroot=args["dataroot"], version=args["version"],
         max_samples=1,
     )
-    frame = _load_frame(loader, token)
+    frame = loader.build_frame_for_token(token)
 
     caster = RayCaster3D(z_min=cfg.Z_MIN_M, z_max=cfg.Z_MAX_M)
     cameras = _prepare_cameras(frame, simulate_dropout=0.0)
@@ -161,27 +157,17 @@ def _export_one(args: dict) -> tuple:
     )
 
     # Backend selection: torch (GPU geometry) or numpy (reference).
-    backend = args["backend"]
-    if backend == "torch":
-        bev_height, osz_ground, osz_eye = \
-            compute_osz_height_aware_from_cameras_torch(
-                cameras, caster,
-                observer_height=cfg.OBSERVER_HEIGHT_M,
-                estimator=estimator,
-                use_uncertainty=args["use_uncertainty"],
-                z_min=caster.z_min,
-                z_max=caster.z_max,
-            )
-    else:
-        bev_height, osz_ground, osz_eye = \
-            compute_osz_height_aware_from_cameras(
-                cameras, caster,
-                observer_height=cfg.OBSERVER_HEIGHT_M,
-                estimator=estimator,
-                use_uncertainty=args["use_uncertainty"],
-                z_min=caster.z_min,
-                z_max=caster.z_max,
-            )
+    compute = (compute_osz_height_aware_from_cameras_torch
+               if args["backend"] == "torch"
+               else compute_osz_height_aware_from_cameras)
+    bev_height, osz_ground, osz_eye = compute(
+        cameras, caster,
+        observer_height=cfg.OBSERVER_HEIGHT_M,
+        estimator=estimator,
+        use_uncertainty=args["use_uncertainty"],
+        z_min=caster.z_min,
+        z_max=caster.z_max,
+    )
 
     if args["use_drivable"]:
         drivable = build_drivable_mask(loader.nusc, token, cfg.BEV_RANGE_M)

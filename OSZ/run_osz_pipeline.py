@@ -3,7 +3,7 @@
 Pipeline stages
 ---------------
 1. Load a nuScenes sample (6-camera images, LiDAR sweeps, calibration).
-2. Predict per-camera metric depth (Depth Anything V2 + LiDAR alignment).
+2. Predict per-camera metric depth (MiDaS v2.1 Small + LiDAR alignment).
 3. Back-project depth maps to the ego frame and build a BEV height map.
 4. Run height-aware 360° ray casting to produce ground OSZ and eye OSZ.
 5. Optionally intersect OSZ with the nuScenes HD-map drivable area.
@@ -137,22 +137,7 @@ def _prepare_cameras(
     frame: dict,
     simulate_dropout: float,
 ) -> dict[str, dict]:
-    """Shallow-copy camera data and optionally apply deterministic dropout.
-
-    Parameters
-    ----------
-    frame : dict
-        Frame dictionary containing a ``cameras`` mapping.
-    simulate_dropout : float
-        Dropout ratio passed to :func:`apply_camera_dropout`. If zero or
-        negative, no dropout is applied.
-
-    Returns
-    -------
-    dict[str, dict]
-        Shallow copy of the camera dictionary, with optional dropout applied
-        in place.
-    """
+    """Shallow-copy cameras; optionally zero a vertical depth stripe."""
     cameras = {k: dict(v) for k, v in frame["cameras"].items()}
     if simulate_dropout > 0:
         apply_camera_dropout(cameras, dropout_ratio=simulate_dropout)
@@ -166,27 +151,7 @@ def _compute_height_aware_osz(
     use_uncertainty: bool,
     estimator: DepthEstimator | MockDepthEstimator | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Compute the BEV height map and the ground/eye OSZ masks.
-
-    Parameters
-    ----------
-    cameras : dict[str, dict]
-        Camera data dictionary with per-camera ``depth_map`` entries.
-    caster : RayCaster3D
-        Configured 3D ray caster.
-    observer_height : float
-        Observer eye height in metres.
-    use_uncertainty : bool
-        Whether to use inverse-uncertainty weighted camera-LiDAR fusion.
-    estimator : DepthEstimator | MockDepthEstimator | None, optional
-        Depth estimator used when camera depth maps need to be generated. If
-        None, the caller is assumed to have already populated ``depth_map``.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray, np.ndarray]
-        ``(bev_height, osz_ground, osz_eye)`` arrays.
-    """
+    """BEV height map + ground/eye OSZ from the camera depth maps."""
     bev_height, osz_ground, osz_eye = compute_osz_height_aware_from_cameras(
         cameras,
         caster,
@@ -204,22 +169,9 @@ def _apply_drivable_filter(
     osz_eye: np.ndarray,
     drivable_mask: np.ndarray | None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Intersect OSZ masks with the drivable area and log coverage.
+    """Intersect masks with the drivable area and log coverage.
 
-    Parameters
-    ----------
-    osz_ground : np.ndarray
-        Binary ground OSZ mask.
-    osz_eye : np.ndarray
-        Binary eye-level OSZ mask.
-    drivable_mask : np.ndarray | None
-        Boolean drivable-area mask, or None to skip filtering.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        Filtered ``(osz_ground, osz_eye)`` masks. If ``drivable_mask`` is
-        None, the inputs are returned unchanged.
+    Returns the inputs unchanged when ``drivable_mask`` is None.
     """
     if drivable_mask is not None:
         osz_ground = filter_osz_by_drivable(osz_ground, drivable_mask)
@@ -235,24 +187,7 @@ def _log_height_diagnostics(
     ego_xi: int,
     ego_yi: int,
 ) -> None:
-    """Print a BEV height summary and the ego cell value.
-
-    Parameters
-    ----------
-    bev_height : np.ndarray
-        BEV height map.
-    observer_height : float
-        Observer eye height in metres (used for threshold reporting).
-    ego_xi : int
-        Ego vehicle grid index along the x axis.
-    ego_yi : int
-        Ego vehicle grid index along the y axis.
-
-    Returns
-    -------
-    None
-        Output is written to stdout.
-    """
+    """Print BEV height summary and the ego cell value."""
     print(f"[height] min={bev_height.min():.2f} max={bev_height.max():.2f} "
           f"mean={bev_height.mean():.2f} occupied={(bev_height > 0.05).sum()}")
     print(f"[height] > 0.3m: {(bev_height > 0.3).sum()}, "
@@ -261,18 +196,7 @@ def _log_height_diagnostics(
 
 
 def _log_depth_diagnostics(cameras: dict[str, dict]) -> None:
-    """Print per-camera depth map summary statistics.
-
-    Parameters
-    ----------
-    cameras : dict[str, dict]
-        Camera data dictionary with per-camera ``depth_map`` entries.
-
-    Returns
-    -------
-    None
-        Output is written to stdout.
-    """
+    """Print per-camera depth map statistics."""
     for cam_name, cam_data in cameras.items():
         d = cam_data["depth_map"]
         print(f"[depth] {cam_name} min={d.min():.2f} max={d.max():.2f} "
@@ -291,36 +215,7 @@ def _plot_osz_panels(
     frame: dict,
     drivable_mask: np.ndarray | None,
 ) -> None:
-    """Draw the 6-panel height-aware OSZ visualization.
-
-    Parameters
-    ----------
-    fig : plt.Figure
-        Matplotlib figure to draw on.
-    axes : np.ndarray
-        2x3 array of matplotlib axes.
-    bev_height : np.ndarray
-        BEV height map.
-    osz_ground : np.ndarray
-        Binary ground OSZ mask.
-    osz_eye : np.ndarray
-        Binary eye-level OSZ mask.
-    semi : np.ndarray
-        Binary semi-transparent zone mask (ground minus eye).
-    caster : RayCaster3D
-        Ray caster that produced the OSZ masks (used for extent/resolution).
-    observer_height : float
-        Observer eye height in metres.
-    frame : dict
-        Frame dictionary containing the ``sample_token``.
-    drivable_mask : np.ndarray | None
-        Drivable-area mask, or None if filtering was not applied.
-
-    Returns
-    -------
-    None
-        The figure is modified in place.
-    """
+    """Draw the 6-panel OSZ visualization (height, ground/eye/semi, combined)."""
     title_filter = " | drivable-filtered" if drivable_mask is not None else ""
     fig.suptitle(
         f"Height-Aware OSZ | token={frame['sample_token']} | "
@@ -448,29 +343,7 @@ def _build_stats_dict(
     semi: np.ndarray,
     caster: RayCaster3D,
 ) -> dict:
-    """Assemble the per-frame statistics dictionary.
-
-    Parameters
-    ----------
-    frame : dict
-        Frame dictionary containing the ``sample_token``.
-    bev_height : np.ndarray
-        BEV height map.
-    osz_ground : np.ndarray
-        Binary ground OSZ mask.
-    osz_eye : np.ndarray
-        Binary eye-level OSZ mask.
-    semi : np.ndarray
-        Binary semi-transparent zone mask.
-    caster : RayCaster3D
-        Ray caster that produced the OSZ masks (used for grid dimensions).
-
-    Returns
-    -------
-    dict
-        Dictionary with sample_token, occupied, osz_ground, osz_eye, semi,
-        osz_ground_ratio, osz_eye_ratio, bev_height, and bev_occ entries.
-    """
+    """Assemble per-frame stats (counts, ratios, raw masks and height)."""
     total = bev_height.size
     bev_occ = bev_height > 0.05
     return {

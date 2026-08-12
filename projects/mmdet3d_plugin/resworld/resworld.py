@@ -1,12 +1,8 @@
 import torch
-import torch.nn as nn
-import numpy as np
 from mmdet.models import DETECTORS
 
 from projects.mmdet3d_plugin.resworld.planner.metric_stp3 import PlanningMetric
 from .bevdet import BEVDepth4D
-from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
-from mmdet3d.models.builder import build_loss
 
 @DETECTORS.register_module()
 class ResWorld(BEVDepth4D):
@@ -94,7 +90,6 @@ class ResWorld(BEVDepth4D):
             return self.extract_img_feat_sequential(img, kwargs['feat_prev'])
         imgs, sensor2keyegos, ego2globals, intrins, post_rots, post_trans, \
         bda, _ = self.prepare_inputs(img)
-        """Extract features of images."""
         bev_feat_list = []
         depth_list = []
         key_frame = True  # back propagation for key frame only
@@ -348,20 +343,11 @@ class ResWorld(BEVDepth4D):
         osz_mask=None,
     ):
         """Test function"""
-        mapped_class_names = [
-            'car', 'truck', 'construction_vehicle', 'bus',
-            'trailer', 'barrier', 'motorcycle', 'bicycle', 
-            'pedestrian', 'traffic_cone'
-        ]
-
         outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev, cmd=ego_fut_cmd,
                                   ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat,
                                   osz_mask=osz_mask)
 
         bbox_results = []
-        # movement = torch.sqrt((outs['ego_fut_preds']**2).sum(-1,keepdim=True)).repeat(1,1,1,2)
-        # outs['ego_fut_preds'][movement<0.05] = 0
-        # outs['ego_fut_preds'][outs['ego_fut_preds'].abs()<0.01] = 0
         for i in range(len(outs['ego_fut_preds'])):
             bbox_result=dict()
             bbox_result['ego_fut_preds'] = outs['ego_fut_preds'][i].cpu()
@@ -369,11 +355,9 @@ class ResWorld(BEVDepth4D):
             bbox_results.append(bbox_result)
 
         assert len(bbox_results) == 1, 'only support batch_size=1 now'
-        # score_threshold = 0.6
         with torch.no_grad():
             gt_bbox = gt_bboxes_3d[0][0]
             gt_map_bbox = map_gt_bboxes_3d[0]
-            gt_label = gt_labels_3d[0][0].to('cpu')
             gt_map_label = map_gt_labels_3d[0].to('cpu')
             gt_attr_label = gt_attr_labels[0][0].to('cpu')
             fut_valid_flag = bool(fut_valid_flag[0][0])
@@ -464,22 +448,9 @@ class ResWorld(BEVDepth4D):
                 metric_dict['plan_L2_{}s'.format(i+1)] = traj_L2
                 metric_dict['plan_obj_col_{}s'.format(i + 1)] = obj_coll.mean().item()
                 metric_dict['plan_obj_box_col_{}s'.format(i + 1)] = obj_box_coll.mean().item()
-                # metric_dict['plan_obj_col_plus_{}s'.format(i + 1)] = obj_coll_plus.mean().item()
-                # metric_dict['plan_obj_box_col_plus_{}s'.format(i + 1)] = obj_box_coll_plus.mean().item()
                 metric_dict['plan_L2_stp3_{}s'.format(i+1)] = traj_L2_stp3
                 metric_dict['plan_obj_col_stp3_{}s'.format(i + 1)] = obj_coll[-1].item()
                 metric_dict['plan_obj_box_col_stp3_{}s'.format(i + 1)] = obj_box_coll[-1].item()
-                # metric_dict['plan_obj_col_stp3_plus_{}s'.format(i + 1)] = obj_coll_plus[-1].item()
-                # metric_dict['plan_obj_box_col_stp3_plus_{}s'.format(i + 1)] = obj_box_coll_plus[-1].item()
-                # if (i == 0):
-                #     metric_dict['plan_1'] = obj_box_coll[0].item()
-                #     metric_dict['plan_2'] = obj_box_coll[1].item()
-                # if (i == 1):
-                #     metric_dict['plan_3'] = obj_box_coll[2].item()
-                #     metric_dict['plan_4'] = obj_box_coll[3].item()
-                # if (i == 2):
-                #     metric_dict['plan_5'] = obj_box_coll[4].item()
-                #     metric_dict['plan_6'] = obj_box_coll[5].item()
             else:
                 metric_dict['plan_L2_{}s'.format(i+1)] = 0.0
                 metric_dict['plan_obj_col_{}s'.format(i+1)] = 0.0

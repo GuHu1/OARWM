@@ -70,7 +70,7 @@ class _Grid:
         self.x_min, self.y_max = x_min, y_max
         self.ego_xi = int(np.floor((0.0 - x_min) / caster.bev_res_x))
         self.ego_yi = int(np.floor((y_max - 0.0) / caster.bev_res_y))
-        # (nx*ny) flat index base for scatter_reduce.
+        # Row-major flat index base (xi * stride + yi) for scatter_/cummax.
         self.stride = ny
         self.device = device
 

@@ -2,7 +2,6 @@
 
 > **基于 Basework**: [ResWorld](https://github.com/mengtan00/ResWorld) (arXiv 2026.02, 已开源)  
 > **定位**: 端到端规划为核心，轻量残差世界模型为推理引擎，显式遮挡几何与多假设动态为安全约束  
-> **目标期刊/会议**: CVPR / ICCV / ECCV / ICRA / IEEE T-ITS
 
 ---
 
@@ -42,50 +41,40 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
 ├─► 几何层 (Stage 1+2): "哪里不可信"
 │     ├─► Stage 1: 图像编码与 GeoBEV 特征提取 (继承 ResWorld)
 │     │     └─► BEV 特征 B_t ∈ R^(H×W×C)
-│     └─► Stage 2: 显式遮挡几何注入 (新增 ★) [已实现, use_osz_midas/use_osz_rcsample]
+│     └─► Stage 2: 显式遮挡几何注入 (新增 ★)
 │           ├─► OSZ 高度感知射线投射 → 遮挡掩码 M_t^occ ∈ {0,1}^(H×W) (osz_eye)
 │           └─► 遮挡感知 BEV 特征 B̃_t = B_t ⊙ (1-M_t^occ) + E_occ ⊙ M_t^occ
 │           ⬇ 传递: M_t^occ（逐层复用，4D 契约 (B,3,H,W)）
 │
-├─► 分布层 (Stage 3): "可能是什么"  [已实现, use_oarwm]
+├─► 分布层 (Stage 3): "可能是什么"
 │     ├─► 可见区: 确定性残差预测 (继承 ResWorld)
 │     └─► 遮挡区: 多假设随机残差转移 MHST (新增 ★)
 │           ├─► K 假设残差 ΔB^(k) + 先验 π + 不确定度 σ   （旁路 aux）
 │           └─► 融合未来 BEV 特征 B̂_{t+1} = Σ_k π_k (B̃_t + ΔB^(k))   （期望输出, 路径 A）
 │           ⬇ 传递: (π, σ, ΔB^(k)) 经 outs['mhst'] 旁路传导（不在表示层坍缩）
 │
-├─► 风险层 (Stage 4): "危险在哪里"  [已实现, use_risk_field]
+├─► 风险层 (Stage 4): "危险在哪里"
 │     ├─► 多假设风险分解 R^(k) = w_σ·σ·‖ΔB^(k)‖·1[M]（语义不可知代理）
 │     ├─► 双输出: 期望风险 R_exp = Σ_k π_k R^(k) 与 最坏风险 R_worst = max_k R^(k)
-│     └─► 不确定性驱动遮挡放大 R̃ = R·(1 + β·U·M), U = H(π)/logK
+│     └─► 不确定性+占用驱动遮挡放大 R̃ = R·(1+β·U·M)·(1+γ·s_occ·M), U = H(π)/logK
 │           ⬇ 传递: (R_exp, R_worst) 至决策层（最坏假设保留, 对齐 Minimax）
 │
-├─► 决策层 (Stage 5): "怎么走"  [设计中]
-│     ├─► BEV Planner (继承 ResWorld)
-│     ├─► Minimax 安全筛选 (消费 R_worst) (新增)
-│     ├─► CVaR 风险约束 (消费 R_exp) (新增)
-│     └─► 信息增益奖励 r_info = ΔR（风险场下降, 主动感知） (新增)
-│     └─► 最优轨迹 τ*
+├─► 决策层 (Stage 5): "怎么走"
+│     ├─► BEV Planner (继承 ResWorld, 单轨迹回归)
+│     ├─► 风险加权轨迹损失 L_plan_risk（沿程 R_worst, Minimax 语义）(新增)
+│     ├─► 沿程风险尾部 L_plan_cvar（CVaR 语义）(新增)
+│     └─► 信息增益奖励 L_plan_info = R_exp(ego) − R_exp(τ_T)（主动感知）(新增)
+│     └─► 预测轨迹 τ（风险规避, 非候选筛选）
 │
-└─► 自监督闭环 (Stage 6): 端到端训练 [设计中]
-      ├─► 可见区 BEV 重建损失 L_recon
+└─► 自监督闭环 (Stage 6): 端到端训练
       ├─► 遮挡区自监督想象损失 L_occ_halluc（静态，§6.2）+ 动态占用监督 L_occ_gt（§6.2b）
       ├─► 多假设多样性损失 L_div（对抗 L_occ_halluc 静态偏置）
       ├─► 不确定性校准损失 L_uncertainty（σ 校准, 训练契约）
-      ├─► 规划损失 L_plan
-      └─► 信息增益损失 L_info = -ΔR
+      ├─► 规划损失 L_plan = L_plan_reg + 风险加权项（含 L_info）
+      └─► 信息增益损失 L_info = −(R_exp(ego) − R_exp(τ_T))
 ```
 
-**实现状态总览**（防止 overclaim，论文写作与评审核对以此为准）：
-
-| 阶段 | 状态 | 关键开关/接口 |
-|---|---|---|
-| Stage 1 | ✅ 继承 ResWorld | — |
-| Stage 2 | ✅ 已实现 | `use_osz_midas`（离线 npz）/ `use_osz_rcsample`（在线同源）；`osz_mask` 4D 契约 |
-| Stage 3 | ✅ 已实现 | `use_oarwm`；`outs['mhst']` = {pi, sigma, delta}；路径 A 期望输出 |
-| Stage 4 | ✅ 已实现 | `use_risk_field`；消费 `outs['mhst']` + `osz_mask`；输出 `outs['risk_field']` |
-| Stage 5 | 📝 设计中（公式见 §5，未实现） | Minimax→R_worst / CVaR→R_exp / r_info→ΔR |
-| Stage 6 | 📝 设计中（部分接口已预留） | L_occ_halluc / L_div / L_uncertainty / L_info；sigma 占位正则已接入 |
+---
 
 **总体设计原则**（贯穿全链路的三个约束）：
 
@@ -134,7 +123,7 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
    仅保留 $D \in (0, 70]\,m$ 且 $z_{\text{ego}} \in [Z_{\text{MIN}}, Z_{\text{MAX}}] = [0.8, 3.0]\,m$ 的点（地面/高楼过滤）。
 3. **BEV 高度图构建**: 将点云聚合到 BEV 网格，记录每个网格的最高高度（`OSZ/modules/bev_height_builder.py::build_bev_height_max`，`np.maximum.at` 聚合）：
    $$H_t(x,y) = \max_{(x,y,z) \in \text{cell}(x,y)} z$$
-   输出 BEV 高度图 $H_t \in \mathbb{R}^{H \times W}$。网格由 `OSZ/config.py` 统一定义并对齐 ResWorld `grid_config`：**200×200 各向异性网格**（$x \in [-15,15]\,m @ 0.15\,m$、$y \in [-30,30]\,m @ 0.3\,m$；`indexing='ij'`，axis-0=ego-x 前进方向，axis-1=ego-y 左侧）。融合策略
+   输出 BEV 高度图 $H_t \in \mathbb{R}^{H \times W}$。网格由 `OSZ/config.py` 统一定义并对齐 ResWorld `grid_config`：**200×200 各向异性网格**（$x \in [-15,15]\,m @ 0.15\,m$、$y \in [-30,30]\,m @ 0.3\,m$；`indexing='ij'`，axis-0=ego-x 前进方向，axis-1=ego-y 左侧）。
 4. **高度感知射线投射**: 以自车位置为中心做 360° 射线投射（`OSZ/modules/ray_casting.py::cast_osz_height_aware`，向量化实现，`substep=0.25` cell 步进、`n_angles ≥ 720`），得到两类遮挡阴影：
    - `osz_ground`: 任意高度 **> 0.05 m** 的占据 cell 均阻挡光线（二值行为，非地面阈值）的**地面层阴影**；
    - `osz_eye`: 仅高度 **> `OBSERVER_HEIGHT_M`（默认 1.2 m）** 的 cell 阻挡光线的**严格盲区**。
@@ -146,9 +135,9 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
    $$\tilde{B}_t = B_t \odot (1 - M_t^{occ}) + E_{occ} \odot M_t^{occ}$$
    其中 $E_{occ} \in \mathbb{R}^{C}$ 为可学习的遮挡类型嵌入（由掩码通道 `(osz_eye, osz_ground, semi)` 经 1×1 Conv 生成，区分严格盲区 / 半透明盲区 / 动态变化遮挡），通过广播与 BEV 特征逐元素相乘。
 
-**输出**: OSZ 模块输出 `bev_height`、`osz_ground`、`osz_eye`、`semi`、`drivable_mask`（200×200，与 ResWorld 网格同格）；OARWM 模型端输出遮挡感知 BEV 特征
+**输出**: OSZ 模块输出 `bev_height`、`osz_ground`、`osz_eye`、`semi`、`drivable_mask`（200×200，与 ResWorld 网格同格）；OARWM 模型端输出遮挡感知 BEV 特征 $\tilde{B}_t$（`OcclusionAwareFusion`）。
 
-**网格对齐**: OSZ 的 BEV 网格已直接对齐 ResWorld `grid_config`——$x \in [-15,15]\,m @ 0.15\,m$、$y \in [-30,30]\,m @ 0.3\,m$（200×200 **各向异性**），定义于 `OSZ/config.py`（单一来源，需与 `resworld_config.py::grid_config` 保持同步）。OSZ 掩码/高度图与 ResWorld BEV 特征同格，**无需任何重采样**，直接注入 Stage 3 的 BEV 特征。
+**网格对齐**: OSZ 的 BEV 网格已直接对齐 ResWorld `grid_config`——$x \in [-15,15]\,m @ 0.15\,m$、$y \in [-30,30]\,m @ 0.3\,m$（200×200 **各向异性**），定义于 `OSZ/config.py`（单一来源，需与 `resworld_config.py::grid_config` 保持同步）。OSZ 掩码与 RCSample 输出（200×200 `grid_config` 网格）同格，**导出与数据加载零重采样**；head 内 BEV 特征经 `bev_encoder` 下采样为 100×100，Stage 2/3/4 注入点统一 `F.interpolate(mode='nearest')` 对齐（见 Stage 3.1）。
 
 - **OSZ 深度估计**：**MiDaS v2.1 Small**
 
@@ -214,7 +203,7 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 - 混合隐变量 $c_t^{(x,y)}$ 提供了可解释性：我们可以检查模型认为"卡车后方最可能出现什么"。
 - 不确定性下限 $\Sigma_{\min}$ 是安全关键设计：即使模型"猜测"遮挡区为空，也保留最低限度的方差，防止过度自信。
 
-#### 3.4 遮挡-可见边界交互 (设计接口)
+#### 3.4 遮挡-可见边界交互 (新增)
 
 当自车执行动作 $a_t$（如减速、变道）后，遮挡掩码 $M_{t+1}^{occ}$ 会动态变化。原本被遮挡的位置可能变为可见。
 
@@ -227,9 +216,9 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 
 ---
 
-### Stage 4: 遮挡想象风险解码与时空风险场生成 (新增 ★, 已实现)
+### Stage 4: 遮挡想象风险解码与时空风险场生成 (新增 ★)
 
-**输入**: Stage 3 的 `outs['mhst']` = $\{\pi \in [0,1]^{B\times H\times W\times K},\ \sigma \in \mathbb{R}^{B\times H\times W},\ \Delta B^{(k)} \in \mathbb{R}^{B\times C\times H\times W}\}$（单帧 K 假设补丁）与 Stage 2 的遮挡掩码 $M_t^{occ} \in \{0,1\}^{H \times W}$（osz_eye，4D 契约）。
+**输入**: Stage 3 的 `outs['mhst']` = $\{\pi \in [0,1]^{B\times K\times H\times W},\ \sigma \in \mathbb{R}^{B\times 1\times H\times W},\ \Delta B^{(k)} \in \mathbb{R}^{B\times K\times C\times H\times W}\}$（单帧 K 假设补丁）与 Stage 2 的遮挡掩码 $M_t^{occ} \in \{0,1\}^{H \times W}$（osz_eye，4D 契约）。
 
 **处理**:
 
@@ -239,13 +228,13 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 
 2. **双输出保留多假设（对齐 Stage 5）**:
    $$R_{\text{exp}}(x,y) = \sum_{k=1}^K \pi_k(x,y)\, R^{(k)}(x,y), \qquad R_{\text{worst}}(x,y) = \max_{k} R^{(k)}(x,y)$$
-   期望风险供 CVaR/常规规划，**最坏风险**供 Minimax——最坏假设（如"可能冲出人"的低先验假设）显式保留到决策层（见 TEMP.md"多假设价值链条"）。
+   期望风险供 CVaR/常规规划，**最坏风险**供 Minimax——最坏假设（如"可能冲出人"的低先验假设）显式保留到决策层。
 
 3. **不确定性 + 占用驱动遮挡放大（替代常数 $\alpha \cdot M$）**:
    $$\tilde{R}(x,y) = R(x,y) \cdot \big(1 + \beta \cdot U(x,y) \cdot M_t^{occ}(x,y)\big) \cdot \big(1 + \gamma \cdot s_{\text{occ}}(x,y) \cdot M_t^{occ}(x,y)\big), \quad U(x,y) = \frac{H(\pi(x,y))}{\log K} \in [0,1]$$
    其中 $H(\pi) = -\sum_k \pi_k \log \pi_k$ 为假设分布熵，$\beta$ 为不确定性放大上限，$s_{\text{occ}}$ 为遮挡区占用概率（6.2b 的占用头输出，$[0,1]$），$\gamma$ 为占用放大权重。语义：**遮挡 + 高不确定（π 均匀）→ 强放大（可能鬼探头）；遮挡 + 低不确定（信念单点，如"墙后确定是墙"）→ 不放大**；**占用高（检测框 GT 指示有动态物）→ 额外放大**——把"变化强度"过滤成"有威胁的变化"，替代初稿对所有遮挡格一视同仁的常数 α。
 
-4. **时空演化接口（先单帧落地，接口为时变）**: 沿候选轨迹/自车运动重采样得 $R_{t+\tau}$；遮挡暴露后按 Stage 3.4 更新 π（信念修正）→ 风险回落 $\Delta R = R_t - R_{t+\tau}$。**实现状态**：当前先实现单帧 $R_t$（`use_risk_field` 开关），时变重采样与 π 更新为接口（与 Stage 5 信息增益奖励联动，见 5.4）。
+4. **时空演化接口（先单帧，接口为时变）**: 沿自车运动/预测轨迹重采样得 $R_{t+\tau}$；遮挡暴露后按 Stage 3.4 更新 π（信念修正）→ 风险回落 $\Delta R = R_t - R_{t+\tau}$。时变重采样与 π 更新为后续接口（与 Stage 5 信息增益奖励联动，见 5.3）。
 
 **输出**: 概率化风险场 $\tilde{R}_{\text{exp}},\ \tilde{R}_{\text{worst}} \in \mathbb{R}^{B \times H \times W}$（存 `outs['risk_field']`，供 Stage 5 消费）。
 
@@ -253,60 +242,60 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 
 **为何如此设计**:
 
-1. **无源语义不可信**：ResWorld 无现成语义头、训练管线无语义监督（lidarseg 覆盖不全、检测框 GT 需新建栅格化）。在语义不可信的前提下，"语义占用 → RiskWeight"的风险是 garbage-in-garbage-out；而鬼探头的本质是"内容未知"而非"内容分类错误"。因此风险直接由 Stage 3 的**不确定性代理**（σ·‖ΔB‖）构造——遮挡 + 内容变化强度大 + 不确定 = 风险，无需猜语义。
+1. **鬼探头源于遮挡区变化过大**：鬼探头的本质是"内容未知"而非"内容分类错误"，因此风险直接由 Stage 3 的**不确定性代理**（σ·‖ΔB‖）构造——遮挡 + 内容变化强度大 + 不确定 = 风险，无需猜语义。
 2. **常数 α 放大在关键区分上失效**：初稿 $(1+\alpha M)$ 对"卡车后可能是空的"（低分歧）与"可能冲出人"（高分歧）给出相同风险——而能否区分这两种格正是鬼探头安全的核心。π 熵驱动的放大（第 3 步）逐格区分，且可解释（放大系数 = 归一化不确定性）。
 3. **最坏假设必须保留到决策**：若 Stage 4 只输出期望（$P_{occ}$ 聚合），Stage 5.2 的 Minimax 便无米下锅（消融 5.2-3 的"w/o Minimax"臂）。双输出使 Minimax（消费 $R_{\text{worst}}$）与 CVaR（消费 $R_{\text{exp}}$）各自有明确输入，公式链自洽。
 
-**可选消融臂（语义解码器，暂不实现）**: 有监督后（如 lidarseg 离线导出 BEV 语义 GT 或检测框栅格化）可启用 BEV 语义解码头，将第 1 步替换为 $R^{(k)} = \sum_c \text{Softmax}(O^{(k)})_c \cdot \text{RiskWeight}(c)$（`RiskWeight` 定义见附录 A），与不确定性代理版做消融对比（语义感知 vs 语义不可知风险）。
-
 ---
 
-### Stage 5: 鲁棒规划与主动感知 (改进 ★)
+### Stage 5: 遮挡感知风险加权规划 (改进 ★)
 
-ResWorld 的 BEV Planner 直接优化轨迹的 L2 偏差与碰撞避免。我们将其升级为**遮挡感知鲁棒规划器**。
+ResWorld 的 BEV Planner 直接优化轨迹的 L2 偏差。我们将其升级为**遮挡感知风险加权规划**——不做显式候选轨迹筛选（ResWorld 是单轨迹回归），而是让 Stage 4 的**保守风险场直接正则化预测轨迹**，端到端学习规避鬼探头高风险区。
 
-#### 5.1 候选轨迹生成 (继承)
+#### 5.1 风险加权轨迹损失（Minimax 语义）
 
-生成 $M$ 条候选轨迹 $\{\tau_1, ..., \tau_M\}$，每条为 $T$ 步的 2D/3D 轨迹点序列。
+预测轨迹（`ego_fut_preds`，增量 cumsum 还原绝对坐标）沿程采样**最坏风险场** $R_{\text{worst}}$（Stage 4 第 2 步，over-K 的 max，即 minimax 语义）：
 
-#### 5.2 Minimax 安全筛选 (新增)
+$$L_{\text{plan\_risk}} = \frac{1}{T}\sum_{t=1}^T R_{\text{worst}}(\tau_t)$$
 
-对每条候选轨迹，在 **K 个假设的最坏情况**下评估代价。Stage 4 已输出逐假设风险 $R^{(k)}$ 与其逐格最大值 $R_{\text{worst}} = \max_k R^{(k)}$（Stage 4 第 2 步），此处直接消费**最坏风险场**（等价于在 K 假设间取最坏的逐时刻代价）：
-$$J_{\text{minimax}}(\tau) = \sum_{t=1}^T \left[ \lambda_1 \cdot \text{Collision}(\tau_t; \tilde{R}_{\text{worst},t}) + \lambda_2 \cdot \tilde{R}_{\text{worst},t}(\tau_t) + \lambda_3 \cdot \text{Comfort}(\tau_t) \right]$$
-其中 $\text{Collision}(\cdot; \tilde{R}_{\text{worst}})$ 为以最坏风险场加权的碰撞代价。选择最小化最坏代价的轨迹：
-$$\tau^*_{\text{safe}} = \arg\min_{\tau} J_{\text{minimax}}(\tau)$$
+按导航指令（`cmd`）只监督对应轨迹；$R_{\text{worst}}$ 经 `grid_sample` 双线性采样（坐标映射与 `col_attn` 的 reference_points 同约定）。**最小化 = 让预测轨迹避开最坏假设下的高风险格**（如"可能冲出人"的区域）。
 
-#### 5.3 CVaR 风险约束 (新增)
+#### 5.2 CVaR 风险约束（沿程风险尾部）
 
-在 Minimax 基础上，进一步引入 **CVaR（条件风险价值）** 约束，关注期望分布下的尾部风险——代价分布由 Stage 4 的**期望风险场** $\tilde{R}_{\text{exp}}$ 构造（多假设按先验 π 加权后的期望代价）：
-$$\text{CVaR}_\beta(\tau) = \mathbb{E}\left[ J(\tau) \mid J(\tau) \geq \text{VaR}_\beta \right]$$
-其中 $\beta$ 为置信水平（如 95%）。最终规划目标为：
-$$\tau^* = \arg\min_{\tau} J_{\text{minimax}}(\tau) \quad \text{s.t.} \quad \text{CVaR}_\beta(\tau) \leq \delta$$
+对指令轨迹沿程的 $R_{\text{exp}}$（期望风险）值集合求**空间尾部均值**（轨迹经过的最高风险段）：
 
-#### 5.4 信息增益奖励与主动感知 (新增 ★)
+$$\text{CVaR}_\beta = \text{mean}\big(\text{top}_{\lceil \beta T \rceil}\{R_{\text{exp}}(\tau_t)\}_{t=1}^T\big), \qquad L_{\text{plan\_cvar}} = \text{CVaR}_\beta$$
 
-在轨迹优化中增加**信息增益奖励**，鼓励自车通过动作减少遮挡不确定性——以 Stage 4 风险场的下降量度量（风险回落 = 遮挡暴露后信念修正带来的信息增益，闭环于 Stage 3.4 与 Stage 4 时空演化）：
-$$r_{\text{info}}(\tau) = \sum_{t=1}^T \sum_{(x,y) \in M_t^{occ}} \mathbb{1}\left[(x,y) \notin M_{t+1}^{occ}(\tau_t)\right] \cdot \Delta R(x,y)$$
-其中 $\Delta R(x,y) = \tilde{R}_{\text{exp},t}(x,y) - \tilde{R}_{\text{exp},t+1}(x,y)$ 为该位置遮挡暴露后（信念按 3.4 修正）风险场的下降量——**风险下降越大，说明该动作越"主动感知"**（如减速增距换取暴露、轻微横向偏移探视）。
+关注轨迹的极端高风险段（如某个时刻恰好穿过鬼探头格），而非平均风险。
 
-总规划目标：
-$$\tau^* = \arg\min_{\tau} \left[ J_{\text{minimax}}(\tau) + \lambda_{\text{CVaR}} \cdot \text{CVaR}_\beta(\tau) - \gamma \cdot r_{\text{info}}(\tau) + \lambda_4 \cdot J_{\text{efficiency}}(\tau) \right]$$
+#### 5.3 信息增益奖励与主动感知 (新增 ★)
+
+以"沿轨迹风险下降"度量主动感知——自车当前位置（ego 原点）风险 vs 轨迹末端风险：
+
+$$r_{\text{info}} = R_{\text{exp}}(\text{ego}) - R_{\text{exp}}(\tau_T), \qquad L_{\text{plan\_info}} = -r_{\text{info}}$$
+
+鼓励轨迹朝"降低遮挡不确定性"的方向走（风险回落 = 主动探测，闭环于 Stage 3.4 信念修正；单帧近似，T 步 rollout 为设计接口）。
+
+#### 5.4 总规划目标
+
+$$L_{\text{plan}} = L_{\text{plan\_reg}} + \lambda_{\text{risk}} L_{\text{plan\_risk}} + \lambda_{\text{CVaR}} L_{\text{plan\_cvar}} + \lambda_{\text{info}} L_{\text{plan\_info}}$$
+
+其中 $L_{\text{plan\_reg}}$ 为原有 L1 轨迹回归（继承），新增三项权重进 `resworld_config.py`（`use_risk_plan` 总开关，0=关即基线）。
+
+**与论文公式的对应（实现范式说明）**：设计初稿的"候选轨迹 + Minimax/CVaR 选择"在 ResWorld 单轨迹回归下不可行（argmin 不可微、训练仅 1 条 GT）。本实现采用**风险加权回归**（方案 A）：Minimax 通过 $R_{\text{worst}}$（over-K max）实现，CVaR 通过沿程风险尾部实现，信息增益通过起点-终点风险差实现——三者都是**可微的端到端规划正则**，保留保守性与主动感知的语义。
 
 **作用**: 
-- Minimax 保证在最坏假设下仍安全；
-- CVaR 约束防止极端尾部风险；
-- 信息增益奖励使系统自发学会"探头"行为（如减速增距、轻微横向偏移）。
+- $L_{\text{plan\_risk}}$ 让轨迹避开最坏假设下的高风险区（鬼探头规避）；
+- $L_{\text{plan\_cvar}}$ 关注极端高风险段（防"平均风险低但某一刻危险"）；
+- $L_{\text{plan\_info}}$ 鼓励主动探测（减速增距/横向偏移降低不确定性）。
 
-**为何如此设计**: 纯保守规划会导致过度被动（如 VAD 在交互场景中完全停车）；信息增益项使系统在安全和效率之间取得平衡，且无需人工设计规则。
+**为何如此设计**: 纯保守（直接最小化平均风险）会导致过度被动；信息增益项平衡安全与效率；方案 A 与 ResWorld 单轨迹回归兼容，可增量训练、消融干净（`use_risk_plan=False` 即基线）。
 
 ---
 
 ### Stage 6: 端到端训练 (完整训练目标)
 
-#### 6.1 可见区 BEV 重建损失 (继承 ResWorld)
-$$L_{\text{recon}} = \sum_{\tau=t+1}^{t+T} \sum_{(x,y) \in \mathcal{V}_\tau} \| \hat{B}_\tau(x,y) - B_\tau^{\text{gt}}(x,y) \|_2^2$$
-
-#### 6.2 遮挡区自监督想象损失 (已实现)
+#### 6.2 遮挡区自监督想象损失 (新增 ★)
 
 利用时序数据中的**自然遮挡暴露**作为监督：t 时刻区域 $A$ 被遮挡，模型生成 K 假设 $\{\hat{B}_{t+1}^{A,(k)}\}_{k=1}^K$ 与权重 $\pi$；t+Δt 时刻自车移动使 $A$ 暴露，获得真值 $B_{t+\Delta t}^{A,\text{gt}}$。用**混合模型对数似然**监督遮挡区条件分布（同时拟合先验 π、假设内容 ΔB^(k)、不确定度 σ）：
 
@@ -314,9 +303,9 @@ $$L_{\text{occ\_halluc}} = -\log \sum_{k=1}^K \pi_t^{A,k} \cdot \mathcal{N}\big(
 
 - **监督对象**：遮挡区的条件分布 $p(B_{t+1}|B_t, M_{\text{occ}})$——π、ΔB^(k)、σ 一起做 EM 式拟合（σ 作分布带宽被隐式监督，与 6.4 显式校准方向一致）；
 - **能力边界（分工设计）**：本损失仅对"内容慢变"的暴露格有效（静态内容）；**动态内容（鬼探头）由 6.2b 的检测框 GT 监督**；6.3 的 $L_{\text{div}}$ 维持假设分离；
-- 需加载相邻帧掩码 `osz_mask_{t+Δt}`（按相邻 token 复用 `_load_osz_mask`）与相邻帧真值 BEV。
+- **监督范围与真值**：监督范围为**当前帧遮挡区**（`osz_eye`），真值为 **next 帧编码 BEV**（`encode_next_bev`，`next_img_inputs` 独立通道，对齐当前 ego 系）——**不加载 next 帧掩码**（暴露判定直接用当前帧遮挡区）；
 
-#### 6.2b 遮挡区动态占用监督（检测框 GT 栅格化，已实现）
+#### 6.2b 遮挡区动态占用监督（检测框 GT 栅格化，新增 ★）
 
 鬼探头场景内容突变，6.2 的暴露自监督对其无效（t 时刻输入无信息）。用**已有检测框 GT** 提供遮挡区的动态内容目标——零新数据、不引入多类别语义（保持语义不可知设计）：
 
@@ -324,27 +313,29 @@ $$L_{\text{occ\_gt}} = \sum_{(x,y) \in \mathcal{O}_t} \text{BCE}\big(s_{\text{oc
 
 其中 $S_{\text{gt}}$ 由 `gt_bboxes_3d`（已在训练 batch）动态栅格化到 BEV 网格（二值：是否有动态障碍物），$s_{\text{occ}}$ 为遮挡区小占用头（1×1 Conv from `pred_bev`），**`pos_weight`（默认 5.0）惩罚漏报占用格**——遮挡区绝大多数格为空（类别不平衡），不加权会退化为全 0 平凡解，学到"遮挡区动态内容"。分工：**6.2 监督静态、6.2b 监督动态、6.3 维持假设分离**。$s_{\text{occ}}$ 输出被 Stage 4 风险场用作**占用驱动放大**（第 3 步的 $\gamma \cdot s_{\text{occ}}$）。
 
-#### 6.3 多假设多样性损失 (已实现)
+#### 6.3 多假设多样性损失 (新增)
 
 防止 $K$ 个假设坍缩为相似模式（**实现为余弦相似度**，单位化后有界 [-1,1]、梯度稳定）：
 $$L_{\text{div}} = \frac{2}{K(K-1)} \sum_{k_1 < k_2} \cos\big(\Delta B^{(k_1)},\, \Delta B^{(k_2)}\big) \cdot w_{\text{div}}$$
 最小化假设残差间的余弦相似度（鼓励方向分离），替代 KL 伪分布（MHST 假设是特征残差非分布）。
 
-#### 6.4 不确定性校准损失 (已实现，替代原占位正则)
+#### 6.4 不确定性校准损失 (新增)
 
 确保遮挡区预测的不确定性与实际误差匹配（**训练契约**：Stage 3 的 σ 语义由本节兑现；实现中 Σ 为标量 σ = softplus(s) + Σ_min，与 `sigma_net` 对接）：
 $$L_{\text{uncertainty}} = \sum_{(x,y) \in \mathcal{O}_t} \left| \sigma_{(x,y)} - \|e_{(x,y)}\|^2 \right|$$
 其中 $e_{(x,y)} = \hat{B}_{t+1}(x,y) - B_{t+\Delta t}^{\text{gt}}(x,y)$ 为**遮挡暴露误差**——与 6.2 的 $L_{\text{occ\_halluc}}$ **共享同一份暴露数据**（零额外成本）。σ 同时在 6.2 混合似然中作分布带宽被隐式监督、在本节被显式校准为预期误差，两者方向一致（误差大的位置 σ 大）。
 
 #### 6.5 规划损失 (继承 + 改进)
-$$L_{\text{plan}} = \|\tau^* - \tau^{\text{gt}}\|_2 + \lambda_{\text{coll}} \cdot \text{CollisionRate}(\tau^*) + \lambda_{\text{info}} \cdot r_{\text{info}}$$
+$$L_{\text{plan}} = L_{\text{plan\_reg}} + \lambda_{\text{risk}} L_{\text{plan\_risk}} + \lambda_{\text{CVaR}} L_{\text{plan\_cvar}} + \lambda_{\text{info}} L_{\text{plan\_info}}$$
+其中 $L_{\text{plan\_reg}}$ 为 ResWorld 原有 L1 轨迹回归，新增三项为 Stage 5 的风险加权规划（见 §5.1-5.3，`use_risk_plan` 开关，0=关即基线）。
 
-#### 6.6 信息增益损失 (新增)
-$$L_{\text{info}} = -r_{\text{info}}(\tau^*)$$
-将信息增益奖励（§5.4，以风险场下降 ΔR 度量）转化为可优化的损失项。
+#### 6.6 信息增益损失 (新增，即 §5.3 的 $L_{\text{plan\_info}}$)
+$$L_{\text{info}} = -r_{\text{info}} = -\big(R_{\text{exp}}(\text{ego}) - R_{\text{exp}}(\tau_T)\big)$$
+鼓励轨迹朝"降低遮挡不确定性"的方向走（风险回落 = 主动探测，单帧近似，T 步 rollout 为设计接口）。
 
 #### 6.7 总体损失
-$$L_{\text{total}} = \omega_1 L_{\text{recon}} + \omega_2 L_{\text{occ\_halluc}} + \omega_2' L_{\text{occ\_gt}} + \omega_3 L_{\text{div}} + \omega_4 L_{\text{uncertainty}} + \omega_5 L_{\text{plan}} + \omega_6 L_{\text{info}}$$
+$$L_{\text{total}} = \omega_2 L_{\text{occ\_halluc}} + \omega_2' L_{\text{occ\_gt}} + \omega_3 L_{\text{div}} + \omega_4 L_{\text{uncertainty}} + \omega_5 L_{\text{plan}}$$
+其中 $L_{\text{plan}}$ 已含 $L_{\text{plan\_reg}}$（L1）+ $L_{\text{plan\_risk}}$ + $L_{\text{plan\_cvar}}$ + $L_{\text{plan\_info}}$（即 $L_{\text{info}}$，见 §6.5/6.6）——**$L_{\text{info}}$ 是 $L_{\text{plan}}$ 的组成部分，不重复计项**；$L_{\text{recon}}$ 因 ResWorld 无未来 BEV 真值而不在总损失中（见 STATUS.md §6）。
 
 ---
 
@@ -356,7 +347,7 @@ $$L_{\text{total}} = \omega_1 L_{\text{recon}} + \omega_2 L_{\text{occ\_halluc}}
 | 世界模型 | 确定性 latent-token 残差预测 | 可见区确定性 + 遮挡区多假设随机转移（分布 (π,σ,ΔB) 经 aux 旁路传导，路径 A） |
 | 遮挡处理 | 隐式（数据驱动） | 显式几何约束 + 多假设想象 |
 | 风险度量 | 无显式风险场（隐式碰撞检查） | 语义不可知双风险场 R_exp/R_worst，不确定性（π 熵）驱动遮挡放大 |
-| 规划目标 | L2 模仿 + 碰撞避免 | Minimax(R_worst) + CVaR(R_exp) + 信息增益(ΔR) 主动感知 |
+| 规划目标 | L2 模仿 + 碰撞避免 | 风险加权规划（沿程 R_worst Minimax 语义 + 沿程尾部 CVaR + 信息增益主动感知，可微端到端正则） |
 | 训练监督 | BEV 重建损失 | + 遮挡暴露自监督 + 假设多样性 + 不确定性校准（σ 训练契约） |
 | 推理速度 | 轻量 (~10-15 FPS) | 相当（MHST 可并行） |
 | 训练算力 | 8×RTX 3090 (24GB)，torch 1.9.1+cu111 | 训练延续 8×RTX 3090（torch 1.9.1 生态，与基线公平对比），全流程单机完成 |
@@ -387,22 +378,3 @@ $$L_{\text{total}} = \omega_1 L_{\text{recon}} + \omega_2 L_{\text{occ\_halluc}}
 2. 提出遮挡区多假设随机残差转移机制（MHST），在 BEV 特征空间实现遮挡区内容的概率化想象；
 3. 提出基于 Minimax-CVaR-信息增益的三层鲁棒规划目标，使系统自发学习"探头确认"行为；
 4. 提出遮挡暴露自监督与不确定性校准联合训练策略，无需额外标注即可监督遮挡区想象。
-
----
-
-## 附录 A: 语义风险加权 RiskWeight(c)（Stage 4 可选消融臂用）
-
-当启用 Stage 4 可选语义解码臂（有监督后，见 Stage 4"可选消融臂"）时，逐假设风险由语义占用概率加权替代语义不可知代理：
-
-$$R^{(k)}(x,y) = \sum_{c \in \mathcal{C}} \text{Softmax}(O^{(k)}(x,y))_c \cdot \text{RiskWeight}(c) \cdot \mathbb{1}[\,M_t^{occ}(x,y)\,]$$
-
-其中 $O^{(k)}$ 为 BEV 语义解码器输出（车辆/行人/骑行者/其他/背景），类别集 $\mathcal{C} = \{\text{vehicle}, \text{pedestrian}, \text{cyclist}, \text{other}\}$。默认权重（保守性取向，可配置，进 `resworld_config.py`）：
-
-| 类别 $c$ | RiskWeight($c$) | 理由 |
-|---|---|---|
-| vehicle | 1.0 | 体积大但轨迹较可预测 |
-| pedestrian | 1.5 | 低速无防护、鬼探头风险最高 |
-| cyclist | 1.5 | 同行人，横向不确定性大 |
-| other | 0.3 | 护栏/锥桶等静态低威胁 |
-
-该臂与语义不可知代理版（$w_\sigma \sigma \|\Delta B^{(k)}\|$）做消融对比（§5.2 第 9 条：语义感知 vs 语义不可知风险）。

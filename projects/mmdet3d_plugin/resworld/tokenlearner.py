@@ -1,8 +1,6 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import math
-"from https://github.com/Kashu7100/TokenLearner/blob/main/model.py"
+# from https://github.com/Kashu7100/TokenLearner/blob/main/model.py
 
 class MlpBlock(nn.Module):
     """Simple MLP block with GELU activation and dropout."""

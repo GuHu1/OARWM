@@ -1,26 +1,18 @@
-import copy
 import math
-from math import pi, cos, sin, log
-import os
+from math import log
 import torch
-import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
-from mmdet.models import HEADS, build_loss 
-from mmdet.models.dense_heads import DETRHead
-from mmcv.runner import force_fp32, auto_fp16
-from mmcv.runner import BaseModule
-from mmdet3d.core.bbox.coders import build_bbox_coder
+from mmdet.models import HEADS, build_loss
+from mmcv.runner import force_fp32, BaseModule
 from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttention
 from mmcv.cnn.bricks.transformer import build_transformer_layer_sequence
-from mmcv.cnn import Linear, bias_init_with_prob
-from torch.cuda.amp.autocast_mode import autocast
-from mmdet.models.backbones.resnet import BasicBlock
-
-from .tokenlearner import *
-from .rcsample import Mlp, SELayer
+from mmcv.cnn import Linear
 from mmcv.cnn.bricks.conv_module import ConvModule
-from mmcv.cnn.bricks.transformer import FFN, build_positional_encoding
+from mmcv.cnn.bricks.transformer import build_positional_encoding
+
+from .tokenlearner import TokenLearner, TokenFuser
+from .rcsample import Mlp
 
 class MLN(nn.Module):
     ''' 
@@ -78,6 +70,22 @@ class SELayerMLP(nn.Module):
         return x * self.gate(x_se)
 
 
+def _align_osz_mask(osz_mask, size, device, dtype):
+    """Move the (B, 3, H, W) OSZ mask onto the BEV feature grid.
+
+    The mask arrives at grid_config resolution (200x200); the BEV feature
+    is 100x100, so it is downsampled (nearest). Shared by the Stage-2/3/4
+    injection points — they all consume the same 4D mask contract.
+    """
+    if osz_mask.dim() != 4:
+        raise ValueError(
+            f"osz_mask must be (B, 3, H, W), got {tuple(osz_mask.shape)}")
+    m = osz_mask.to(device=device, dtype=dtype)
+    if m.shape[-2:] != size:
+        m = F.interpolate(m, size=size, mode="nearest")
+    return m
+
+
 class OcclusionAwareFusion(nn.Module):
     """Stage-2 occlusion injection: B~ = B⊙(1-M) + E_occ⊙M.
 
@@ -112,8 +120,9 @@ def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0,
         U        = H(pi) / log K                           normalised prior entropy
         boost    = (1 + beta*U*M) * (1 + gamma*s_occ*M)    uncertainty-driven AND
                                                            occupancy-driven boost
-    ``s_occ`` (if given) is the occlusion occupancy probability in [0,1];
-    it amplifies the risk where a dynamic object is predicted — turning raw
+    ``s_occ`` (if given) is the raw occlusion-occupancy logit from
+    ``occ_head``; a sigmoid turns it into a probability in (0,1), which
+    amplifies the risk where a dynamic object is predicted — turning raw
     "change intensity" into "threatening change".
 
     Returns ``(B, 2, H, W)`` = ``[R~_exp, R~_worst]``. All-zero mask -> 0 risk.
@@ -130,6 +139,10 @@ def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0,
     u = h_pi / log_k                                  # (B,H,W) in [0,1]
     boost = 1.0 + beta * u * m[:, 0]                  # (B,H,W)
     if s_occ is not None:
+        # occ_head emits raw logits; sigmoid -> occupancy probability in
+        # (0,1) so the boost stays bounded in [1, 1+gamma] (no negative
+        # logit shrinking the risk, none large enough to explode it).
+        s_occ = s_occ.sigmoid()                       # (B,1,H,W)
         boost = boost * (1.0 + gamma * s_occ[:, 0] * m[:, 0])
     r_exp = r_exp * boost
     r_worst = r_worst * boost
@@ -148,15 +161,16 @@ class OcclusionMHSTHead(nn.Module):
                    = sum_k pi_k(x,y) * (pred_bev + dB^k)(x,y)   occluded
 
     Components (design doc Stage 3):
-      * prior network g_prior: [pred_bev | mask] -> 1x1 conv -> 3x3 conv
-        (the 3x3 aggregates the occluded-boundary neighbourhood N(x,y))
-        -> K logits -> softmax = pi (B, K, H, W).
+      * prior network g_prior: [pred_bev | mask] -> 1x1 conv -> multi-scale
+        dilated neighbourhood (3x3 convs, dilation 1/2/4, receptive fields
+        3/5/9 cells, aggregating N(x,y)) -> concat -> 1x1 conv -> K logits
+        -> softmax = pi (B, K, H, W).
       * K-hypothesis residuals (MoE-style): one shared backbone
         (1x1 + 3x3 conv) then K independent expert 3x3 convs -> dB^k
         (B, K, C, H, W). K=1 is the single-hypothesis ablation.
       * uncertainty: sigma = softplus(s) + sigma_min (B, 1, H, W), kept
-        for the Stage-6 calibration losses; it does NOT alter the fused
-        output here (the mixture already is the expectation).
+        for the calibration losses; it does NOT alter the fused output
+        here (the mixture already is the expectation).
 
     An all-zero mask makes the head the identity (fused == pred_bev), so
     ``use_oarwm=False`` (or an empty mask) stays strictly baseline-exact.
@@ -260,6 +274,13 @@ class ResWorldHead(BaseModule):
                  loss_uncertainty_weight=1.0,
                  loss_occ_gt_weight=1.0,
                  loss_occ_gt_pos_weight=5.0,
+                 # Stage-5 risk-weighted planning (approach A: no candidate
+                 # selection; the risk field regularises the trajectory).
+                 use_risk_plan=False,
+                 loss_plan_risk_weight=1.0,
+                 loss_plan_cvar_weight=1.0,
+                 loss_plan_info_weight=0.5,
+                 cvar_beta=0.25,
                  **kwargs):
         super(ResWorldHead, self).__init__()
         self.bev_h = bev_h
@@ -303,6 +324,12 @@ class ResWorldHead(BaseModule):
         self.loss_uncertainty_weight = loss_uncertainty_weight
         self.loss_occ_gt_weight = loss_occ_gt_weight
         self.loss_occ_gt_pos_weight = loss_occ_gt_pos_weight
+        # Stage-5 risk-weighted planning.
+        self.use_risk_plan = use_risk_plan
+        self.loss_plan_risk_weight = loss_plan_risk_weight
+        self.loss_plan_cvar_weight = loss_plan_cvar_weight
+        self.loss_plan_info_weight = loss_plan_info_weight
+        self.cvar_beta = cvar_beta
         self._init_layers()
         self.loss_plan_reg = build_loss(loss_plan_reg)
         self.loss_plan_reg_init = build_loss(loss_plan_reg)
@@ -394,15 +421,8 @@ class ResWorldHead(BaseModule):
         bev_embed = self.bev_fusion_conv(bev_embed.reshape(bs, self.num_frames * c, h, w))
         if self.use_osz and osz_mask is not None:
             # Stage-2 occlusion-aware injection (OARWM). Mask channels are
-            # (osz_eye, osz_ground, semi). The mask is 4D (B, 3, H, W) by
-            # contract: the online mask (rcsample) returns it directly and
-            # the offline npz is collated (torch default_collate stacks the
-            # (3, H, W) arrays along a new batch dim). All-zeros = identity.
-            assert osz_mask.dim() == 4, \
-                f"osz_mask must be (B, 3, H, W), got {tuple(osz_mask.shape)}"
-            m = osz_mask.to(device=device).to(dtype)
-            if m.shape[-2:] != (h, w):
-                m = F.interpolate(m, size=(h, w), mode="nearest")
+            # (osz_eye, osz_ground, semi). All-zeros = identity.
+            m = _align_osz_mask(osz_mask, (h, w), device, dtype)
             bev_embed = self.osz_fusion(bev_embed, m)
         bev_feats = bev_feats.view(self.num_frames, bs, c, h, w)
 
@@ -504,13 +524,7 @@ class ResWorldHead(BaseModule):
             #  * The OSZ mask is (B, 3, 200, 200) (grid_config); the BEV
             #    feature is 100x100, so the mask is downsampled (nearest).
             pb = pred_bev.permute(0, 2, 1).reshape(bs, c, h, w)
-            # Same 4D mask contract as Stage 2 (online mask / collated npz).
-            assert osz_mask.dim() == 4, \
-                f"osz_mask must be (B, 3, H, W), got {tuple(osz_mask.shape)}"
-            mhst_mask = osz_mask.to(device=device, dtype=pb.dtype)
-            if mhst_mask.shape[-2:] != (h, w):
-                mhst_mask = F.interpolate(
-                    mhst_mask, size=(h, w), mode="nearest")
+            mhst_mask = _align_osz_mask(osz_mask, (h, w), device, pb.dtype)
             fused, mhst_aux = self.mhst(pb, mhst_mask)
             # Extra aux for the Stage-6 losses: un-fused 4D pred_bev, the
             # occlusion occupancy prediction and the aligned osz_eye mask.
@@ -532,14 +546,7 @@ class ResWorldHead(BaseModule):
             # Stage-4 risk field: semantic-agnostic proxy from the MHST aux
             # (pi / sigma / delta), grid-aligned with the BEV feature. No
             # learnable parameters — a pure function of the distribution.
-            if osz_mask.dim() != 4:
-                raise ValueError(
-                    f"osz_mask must be (B, 3, H, W), got "
-                    f"{tuple(osz_mask.shape)}")
-            rf_mask = osz_mask.to(device=device, dtype=pred_bev.dtype)
-            if rf_mask.shape[-2:] != (h, w):
-                rf_mask = F.interpolate(
-                    rf_mask, size=(h, w), mode="nearest")
+            rf_mask = _align_osz_mask(osz_mask, (h, w), device, pred_bev.dtype)
             risk_field = build_risk_field(
                 mhst_aux['pi'], mhst_aux['sigma'], mhst_aux['delta'],
                 rf_mask, beta=self.risk_beta, w_sigma=self.risk_w_sigma,
@@ -705,6 +712,67 @@ class ResWorldHead(BaseModule):
                         s_occ, occ_gt, pos_weight=pos, reduction='none')
                     * occ_mask.float()
                 ).sum() / n_occ * self.loss_occ_gt_weight
+
+        # ---- Stage-5 risk-weighted planning (design doc §5, approach A) ----
+        # No candidate selection: the risk field (R_worst / R_exp) directly
+        # regularises the predicted trajectory so the network learns to avoid
+        # high-risk (ghost-probe) regions end-to-end. R_worst is the over-K
+        # max (minimax semantics); the step-risk tail gives CVaR; the
+        # start-vs-end risk drop rewards active sensing (info gain).
+        risk_field = preds_dicts.get('risk_field')   # (B, 2, H, W)
+        if self.use_risk_plan and risk_field is not None:
+            # absolute trajectory coords (per-step increments -> cumsum)
+            traj_abs = ego_fut_preds.cumsum(dim=2)    # (B, M, T, 2)
+            device = traj_abs.device
+            gmin = self.grid_min.to(device)
+            gsz = self.grid_size.to(device)
+            # normalised grid coords (col_attn convention: /grid_size/200)
+            nx = (traj_abs[..., 0] - gmin[0]) / (gsz[0] * 200)   # 0-1
+            ny = (traj_abs[..., 1] - gmin[1]) / (gsz[1] * 200)
+            grid = torch.stack([nx * 2 - 1, ny * 2 - 1], dim=-1)  # (B,M,T,2)
+            B, M, T, _ = grid.shape
+            # Sample both risk fields in one call (channel 0 = R_exp for
+            # CVaR / info gain, 1 = R_worst for minimax).
+            sampled = F.grid_sample(
+                risk_field, grid.reshape(B, M * T, 1, 2),
+                mode='bilinear', align_corners=False).reshape(B, M * T, 2)
+            r_worst = sampled[..., 1].reshape(B, M, T)
+            r_exp = sampled[..., 0].reshape(B, M, T)
+            # command-weighted: only the commanded trajectory is supervised
+            cmd_w = ego_fut_cmd  # (B, M) one-hot (squeezed above)
+            fut_w = ego_fut_masks.float()             # (B, T) valid flags
+            r_cmd = (r_worst * cmd_w.unsqueeze(-1)).sum(dim=1)   # (B, T)
+            re_cmd = (r_exp * cmd_w.unsqueeze(-1)).sum(dim=1)    # (B, T)
+
+            # minimax-style: mean commanded step risk over valid steps
+            loss_dict['loss_plan_risk'] = (
+                (r_cmd * fut_w).sum() / fut_w.sum().clamp(min=1.0)
+                * self.loss_plan_risk_weight)
+
+            # CVaR: tail of the commanded trajectory's step-risk values
+            if self.loss_plan_cvar_weight > 0:
+                k = max(1, int(math.ceil(T * self.cvar_beta)))
+                topk = r_cmd.topk(k, dim=1).values.mean(dim=1)
+                loss_dict['loss_plan_cvar'] = (
+                    topk.mean() * self.loss_plan_cvar_weight)
+
+            # info gain: moving to reduce risk (start vs end of trajectory)
+            if self.loss_plan_info_weight > 0:
+                # ego sits at the grid origin; expand the (1,1,1,2) sample
+                # grid to batch size B — grid_sample requires input and
+                # grid to share the batch dim (B>1 training batches).
+                egx = (0.0 - gmin[0]) / (gsz[0] * 200) * 2 - 1
+                egy = (0.0 - gmin[1]) / (gsz[1] * 200) * 2 - 1
+                ego_grid = torch.tensor(
+                    [[egx, egy]], dtype=torch.float32,
+                    device=device).view(1, 1, 1, 2).expand(B, 1, 1, 2)
+                r_ego = F.grid_sample(
+                    r_exp, ego_grid, mode='bilinear',
+                    align_corners=False).reshape(B)   # (B,)
+                r_end = re_cmd[:, -1]                  # (B,) risk at trajectory end
+                info = (r_ego - r_end).mean()          # risk drop = active sensing
+                loss_dict['loss_plan_info'] = (
+                    -info * self.loss_plan_info_weight)
 
         return loss_dict
 

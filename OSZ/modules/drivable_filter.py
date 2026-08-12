@@ -221,7 +221,6 @@ def build_drivable_mask(
     if not MAP_AVAILABLE:
         return np.ones((nx, ny), dtype=bool)
 
-    sample = nusc.get("sample", sample_token)
     map_name = get_map_name(nusc, sample_token)
     try:
         nusc_map = get_nusc_map(nusc.dataroot, map_name)

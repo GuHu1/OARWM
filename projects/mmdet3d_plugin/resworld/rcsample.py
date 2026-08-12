@@ -9,7 +9,6 @@ from torch.utils.checkpoint import checkpoint
 
 from mmdet.models.backbones.resnet import BasicBlock
 from mmdet3d.models.builder import NECKS
-from time import time
 
 class BCEFocalLoss(torch.nn.Module):
     def __init__(self, gamma=2, alpha=0.25, reduction='mean'):

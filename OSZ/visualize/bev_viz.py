@@ -37,12 +37,9 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.colors import ListedColormap
 
 from OSZ import config as cfg
 from OSZ.utils.geometry import (
-    ego_pose_from_sample_data,
-    get_map_name,
     get_vehicle_states_ego,
     bev_box_corners_ego,
     bev_extent as _bev_extent,

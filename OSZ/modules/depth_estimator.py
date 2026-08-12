@@ -379,9 +379,6 @@ class MockDepthEstimator:
     >>> depth_metric = est.infer(image, lidar_dense_depth=dense_depth)
     """
 
-    def __init__(self):
-        pass
-
     def infer(
         self,
         image: np.ndarray,
