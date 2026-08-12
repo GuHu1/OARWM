@@ -44,13 +44,6 @@ risk_gamma = 1.0          # occupancy-driven boost weight (γ, on s_occ·M)
 assert (not use_risk_field) or use_oarwm, \
     'use_risk_field (Stage 4) requires use_oarwm (Stage 3)'
 
-# --- Stage-6 loss weights (0 disables a term) ---
-loss_div_weight = 0.1            # hypothesis diversity (ΔB pairwise)
-loss_occ_halluc_weight = 1.0     # exposure mixture likelihood
-loss_uncertainty_weight = 1.0    # σ calibration
-loss_occ_gt_weight = 1.0         # detection-box BEV occupancy BCE
-loss_occ_gt_pos_weight = 5.0     # BCE pos_weight (penalise missed occupancies)
-
 # --- Stage-5 risk-weighted planning (approach A: no candidate selection) ---
 use_risk_plan = True             # False = skip risk-weighted planning losses
 loss_plan_risk_weight = 1.0      # minimax-style mean step risk on the trajectory
@@ -59,6 +52,13 @@ loss_plan_info_weight = 0.5      # info gain (start-vs-end risk drop, active sen
 cvar_beta = 0.25                 # CVaR tail fraction of the trajectory steps
 assert (not use_risk_plan) or use_risk_field, \
     'use_risk_plan (Stage 5) requires use_risk_field (Stage 4)'
+
+# --- Stage-6 loss weights (0 disables a term) ---
+loss_div_weight = 0.1            # hypothesis diversity (ΔB pairwise)
+loss_occ_halluc_weight = 1.0     # exposure mixture likelihood
+loss_uncertainty_weight = 1.0    # σ calibration
+loss_occ_gt_weight = 1.0         # detection-box BEV occupancy BCE
+loss_occ_gt_pos_weight = 5.0     # BCE pos_weight (penalise missed occupancies)
 
 #
 plugin = True
