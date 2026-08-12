@@ -758,17 +758,20 @@ class ResWorldHead(BaseModule):
 
             # info gain: moving to reduce risk (start vs end of trajectory)
             if self.loss_plan_info_weight > 0:
-                # ego sits at the grid origin; expand the (1,1,1,2) sample
-                # grid to batch size B — grid_sample requires input and
-                # grid to share the batch dim (B>1 training batches).
+                # Sample R_exp at the ego cell (grid origin). The ego grid
+                # is expanded to batch size B — grid_sample requires input
+                # and grid to share the batch dim (B>1 training batches).
+                # Sample the raw risk_field (B,2,H,W), NOT r_exp — that is
+                # already the per-step sampled values (B, M, T) and would
+                # break grid_sample's 4D input contract.
                 egx = (0.0 - gmin[0]) / (gsz[0] * 200) * 2 - 1
                 egy = (0.0 - gmin[1]) / (gsz[1] * 200) * 2 - 1
                 ego_grid = torch.tensor(
                     [[egx, egy]], dtype=torch.float32,
                     device=device).view(1, 1, 1, 2).expand(B, 1, 1, 2)
                 r_ego = F.grid_sample(
-                    r_exp, ego_grid, mode='bilinear',
-                    align_corners=False).reshape(B)   # (B,)
+                    risk_field[:, 0:1], ego_grid, mode='bilinear',
+                    align_corners=False).reshape(B)   # (B,) R_exp at ego
                 r_end = re_cmd[:, -1]                  # (B,) risk at trajectory end
                 info = (r_ego - r_end).mean()          # risk drop = active sensing
                 loss_dict['loss_plan_info'] = (
