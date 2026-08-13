@@ -73,14 +73,27 @@ class SELayerMLP(nn.Module):
 def _align_osz_mask(osz_mask, size, device, dtype):
     """Move the (B, 3, H, W) OSZ mask onto the BEV feature grid.
 
-    The mask arrives at grid_config resolution (200x200); the BEV feature
-    is 100x100, so it is downsampled (nearest). Shared by the Stage-2/3/4
-    injection points — they all consume the same 4D mask contract.
+    AXIS CONTRACT (fixed 2026-08-13 — was transposed 90°, see ISSUE.md P0-3):
+      * OSZ masks are exported with ``axis-0 = ego-x`` (forward, 0.15 m/cell)
+        and ``axis-1 = ego-y`` (left, 0.3 m/cell) — OSZ/config.py and
+        OSZ/modules/bev_height_builder.py (``xi`` indexes axis-0, ``yi``
+        axis-1); the online ``build_osz_mask_online`` (torch_pipeline.py)
+        follows the same convention.
+      * The ResWorld BEV feature map is the OPPOSITE: ``axis-0 = ego-y`` and
+        ``axis-1 = ego-x`` — rcsample.py::create_grid_infos builds
+        ``bev_coor`` so the x component varies along axis-1 (W) and the y
+        component along axis-0 (H); col_attn samples it with
+        ``spatial_shapes=(bev_w, bev_h)`` (x along W).
+      * The mask is therefore TRANSPOSED here (before the resize): OSZ cell
+        (i=xi, j=yi) must land on feature cell (row=yi, col=xi) — i.e. M.T.
+        Keep OSZ as ``axis-0=x``; do NOT "fix" OSZ to ``axis-0=y``, or this
+        transpose double-flips the mask back into the bug.
     """
     if osz_mask.dim() != 4:
         raise ValueError(
             f"osz_mask must be (B, 3, H, W), got {tuple(osz_mask.shape)}")
     m = osz_mask.to(device=device, dtype=dtype)
+    m = m.transpose(-1, -2)              # OSZ axis-0=x -> feature axis-0=y
     if m.shape[-2:] != size:
         m = F.interpolate(m, size=size, mode="nearest")
     return m
@@ -289,6 +302,11 @@ class ResWorldHead(BaseModule):
                  loss_plan_cvar_weight=1.0,
                  loss_plan_info_weight=0.5,
                  cvar_beta=0.25,
+                 # Risk terms are disabled for the first N epochs (sigma not
+                 # yet calibrated by L_uncertainty, MHST randomly initialised
+                 # — ISSUE.md P0-1/P1-2). The field is still sampled so the
+                 # [DIAG] line keeps reporting r_cmd during warmup.
+                 risk_plan_warmup_epochs=2,
                  **kwargs):
         super(ResWorldHead, self).__init__()
         self.bev_h = bev_h
@@ -338,6 +356,7 @@ class ResWorldHead(BaseModule):
         self.loss_plan_cvar_weight = loss_plan_cvar_weight
         self.loss_plan_info_weight = loss_plan_info_weight
         self.cvar_beta = cvar_beta
+        self.risk_plan_warmup_epochs = risk_plan_warmup_epochs
         self._init_layers()
         self.loss_plan_reg = build_loss(loss_plan_reg)
         self.loss_plan_reg_init = build_loss(loss_plan_reg)
@@ -729,6 +748,11 @@ class ResWorldHead(BaseModule):
         # start-vs-end risk drop rewards active sensing (info gain).
         risk_field = preds_dicts.get('risk_field')   # (B, 2, H, W)
         if self.use_risk_plan and risk_field is not None:
+            # Risk terms are disabled for the first risk_plan_warmup_epochs
+            # epochs (sigma not yet calibrated, MHST randomly initialised —
+            # ISSUE.md P0-1/P1-2). The field is still sampled below so the
+            # [DIAG] line keeps reporting r_cmd during warmup.
+            risk_active = getattr(self, 'epoch', -1) >= self.risk_plan_warmup_epochs
             # absolute trajectory coords (per-step increments -> cumsum)
             traj_abs = ego_fut_preds.cumsum(dim=2)    # (B, M, T, 2)
             device = traj_abs.device
@@ -752,38 +776,39 @@ class ResWorldHead(BaseModule):
             r_cmd = (r_worst * cmd_w.unsqueeze(-1)).sum(dim=1)   # (B, T)
             re_cmd = (r_exp * cmd_w.unsqueeze(-1)).sum(dim=1)    # (B, T)
 
-            # minimax-style: mean commanded step risk over valid steps
-            loss_dict['loss_plan_risk'] = (
-                (r_cmd * fut_w).sum() / fut_w.sum().clamp(min=1.0)
-                * self.loss_plan_risk_weight)
+            if risk_active:
+                # minimax-style: mean commanded step risk over valid steps
+                loss_dict['loss_plan_risk'] = (
+                    (r_cmd * fut_w).sum() / fut_w.sum().clamp(min=1.0)
+                    * self.loss_plan_risk_weight)
 
-            # CVaR: tail of the commanded trajectory's step-risk values
-            if self.loss_plan_cvar_weight > 0:
-                k = max(1, int(math.ceil(T * self.cvar_beta)))
-                topk = r_cmd.topk(k, dim=1).values.mean(dim=1)
-                loss_dict['loss_plan_cvar'] = (
-                    topk.mean() * self.loss_plan_cvar_weight)
+                # CVaR: tail of the commanded trajectory's step-risk values
+                if self.loss_plan_cvar_weight > 0:
+                    k = max(1, int(math.ceil(T * self.cvar_beta)))
+                    topk = r_cmd.topk(k, dim=1).values.mean(dim=1)
+                    loss_dict['loss_plan_cvar'] = (
+                        topk.mean() * self.loss_plan_cvar_weight)
 
-            # info gain: moving to reduce risk (start vs end of trajectory)
-            if self.loss_plan_info_weight > 0:
-                # Sample R_exp at the ego cell (grid origin). The ego grid
-                # is expanded to batch size B — grid_sample requires input
-                # and grid to share the batch dim (B>1 training batches).
-                # Sample the raw risk_field (B,2,H,W), NOT r_exp — that is
-                # already the per-step sampled values (B, M, T) and would
-                # break grid_sample's 4D input contract.
-                egx = (0.0 - gmin[0]) / (gsz[0] * 200) * 2 - 1
-                egy = (0.0 - gmin[1]) / (gsz[1] * 200) * 2 - 1
-                ego_grid = torch.tensor(
-                    [[egx, egy]], dtype=torch.float32,
-                    device=device).view(1, 1, 1, 2).expand(B, 1, 1, 2)
-                r_ego = F.grid_sample(
-                    risk_field[:, 0:1], ego_grid, mode='bilinear',
-                    align_corners=False).reshape(B)   # (B,) R_exp at ego
-                r_end = re_cmd[:, -1]                  # (B,) risk at trajectory end
-                info = (r_ego - r_end).mean()          # risk drop = active sensing
-                loss_dict['loss_plan_info'] = (
-                    -info * self.loss_plan_info_weight)
+                # info gain: moving to reduce risk (start vs end of trajectory)
+                if self.loss_plan_info_weight > 0:
+                    # Sample R_exp at the ego cell (grid origin). The ego grid
+                    # is expanded to batch size B — grid_sample requires input
+                    # and grid to share the batch dim (B>1 training batches).
+                    # Sample the raw risk_field (B,2,H,W), NOT r_exp — that is
+                    # already the per-step sampled values (B, M, T) and would
+                    # break grid_sample's 4D input contract.
+                    egx = (0.0 - gmin[0]) / (gsz[0] * 200) * 2 - 1
+                    egy = (0.0 - gmin[1]) / (gsz[1] * 200) * 2 - 1
+                    ego_grid = torch.tensor(
+                        [[egx, egy]], dtype=torch.float32,
+                        device=device).view(1, 1, 1, 2).expand(B, 1, 1, 2)
+                    r_ego = F.grid_sample(
+                        risk_field[:, 0:1], ego_grid, mode='bilinear',
+                        align_corners=False).reshape(B)   # (B,) R_exp at ego
+                    r_end = re_cmd[:, -1]                  # (B,) risk at trajectory end
+                    info = (r_ego - r_end).mean()          # risk drop = active sensing
+                    loss_dict['loss_plan_info'] = (
+                        -info * self.loss_plan_info_weight)
 
         # ---- [DIAG] temporary risk-planning diagnostics (remove after tuning) ----
         # Caches a per-iter diagnostic line; DiagLoggerHook prints it at the

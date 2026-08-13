@@ -57,6 +57,34 @@
 
 ---
 
+## P0-3 [fixed] 掩码轴序转置错位：OSZ axis-0=x vs BEV 特征 axis-0=y
+
+- **位置**：`resworld_head.py::_align_osz_mask`（Stage 2/3/4/6 所有掩码消费点：注入、MHST 门控、风险场、暴露监督）
+- **现象（已由 [DIAG] 实证，2026-08-13，训练日志 epoch 1-4）**：
+  - `r_cmd_mean=0.00000`、`r_cmd_pos_frac=0.000`——约 800 次迭代中仅十几次非零，
+    **轨迹从未采到正风险**，而同一日志 `rf_occ=0.2~2.7`（风险场明显非零）→ Stage 5 三项静默失效；
+  - `loss_plan_risk / cvar / info` 数值 ≈ 0.0000-0.02，权重 1.0/1.0/0.5 形同虚设；
+- **原因**：两套网格轴序**互为转置**，注入时未转置：
+  - OSZ 掩码 `(3, 200, 200)`：**axis-0 = ego-x**（前进，0.15 m/cell）、axis-1 = ego-y
+    （`OSZ/config.py`、`bev_height_builder.py` xi→axis-0 / yi→axis-1，在线
+    `build_osz_mask_online` 同约定）；
+  - ResWorld BEV 特征 `(B, C, H, W)`：**axis-0(H) = ego-y、axis-1(W) = ego-x**
+    （`rcsample.py::create_grid_infos` 的 `y_coor, x_coor = meshgrid(x_coor, y_coor)`
+    变量名与内容相反，`bev_coor=stack([x_coor, y_coor])` 使 x 沿 W 变化；col_attn
+    `spatial_shapes=(bev_w, bev_h)` 按此采样）；
+  - 同一世界点 (x=5, y=3)：OSZ 掩码 `(axis0=133, axis1=90)`，特征图 `(row=90, col=133)`
+    ——掩码需 `M.T` 对齐，`_align_osz_mask` 只 `interpolate` 不转置 → 90° 错位。
+- **后果链**：Stage 2 遮挡嵌入注入到非遮挡格（真实遮挡格未被处理，特征被污染，**劣于基线的最大风险源**）；
+  Stage 3 多假设作用在错误格；Stage 4 风险场错位（轨迹按正确坐标采样 → r_cmd=0）；Stage 6 暴露监督错位
+  （loss 仍下降，因为在错误位置拟合，曲线看似正常）。
+- **修复（2026-08-13）**：`_align_osz_mask` 先 `transpose(-1,-2)` 再插值（转置后 y 向 0.3→0.6、x 向 0.15→0.3 m/cell，
+  与特征图恰好一致）。**OSZ 保持 axis-0=x 约定不变**——勿"修正"OSZ 侧，否则双重转置复现 bug（docstring 已固化契约）。
+  配套：`loss_depth_weight` 0.1→0.3（在线掩码质量依赖深度头）；`risk_plan_warmup_epochs=2`（前 2 epoch 关风险项，
+  见 P0-1/P1-2 冷启动）。
+- **状态**：`fixed`（待服务器重训验证：`r_cmd_pos_frac` 应显著上升、`loss_plan_risk/cvar/info` 有真实量级）
+
+---
+
 ## P1-1 [open] `loss_plan_info` 为负损失、无下界
 
 - **位置**：`resworld_head.py` loss（`info = (r_ego - r_end).mean(); loss = -info`）
@@ -96,6 +124,9 @@
   npz 加载 `drivable_mask`（与深度源无关），`build_osz_mask_online` 中
   `osz &= drivable`，路外建筑/设施不再计入遮挡（P0-1 的掩码过曝源头）。
   改动：`torch_pipeline.py`/`resworld.py`/`nuscenes_resworld_dataset.py`/`resworld_config.py`
+- **过渡措施（2026-08-13）**：drivable 未开期间，`loss_depth_weight` 0.1→0.3
+  提升 RCSample 深度头质量（在线掩码的直接依赖）；导出完成后回退 0.1 并置
+  `use_osz_drivable=True`。另见 P0-3（掩码轴序转置修复）。
 - **状态**：`on-hold`——约束实现完成但**默认关闭**（`use_osz_drivable=False`），
   避免 midas npz 导出窗口期的样本间数据冲突；待 `data/osz` 用 `--use_drivable`
   导出完成后置 True 再验证 `occ_frac` 回落

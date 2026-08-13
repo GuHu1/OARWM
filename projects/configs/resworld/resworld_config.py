@@ -169,7 +169,11 @@ model = dict(
         ins_channels=[512],
         out_channels=numC_Trans,
         depthnet_cfg=dict(use_dcn=False, aspp_mid_channels=96),
-        loss_depth_weight=[0.1],
+        # P1-3 transition (2026-08-13): depth weight raised 0.1->0.3 while
+        # use_osz_drivable stays OFF (data/osz midas export in progress) — the
+        # online (rcsample) mask quality depends on this depth head. Revert to
+        # 0.1 once drivable-constrained masks are enabled.
+        loss_depth_weight=[0.3],
         downsamples=[16]),
     img_bev_encoder_backbone=dict(
         type='CustomResNet',
@@ -213,6 +217,7 @@ model = dict(
         loss_plan_cvar_weight=loss_plan_cvar_weight,
         loss_plan_info_weight=loss_plan_info_weight,
         cvar_beta=cvar_beta,
+        risk_plan_warmup_epochs=2,  # risk terms off for epochs 0-1 (P0-1/P1-2)
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,
