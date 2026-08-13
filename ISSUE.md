@@ -23,7 +23,7 @@
 
 ---
 
-## P0-1 [open] Stage-5 风险损失与 L2 回归目标对抗，且 `‖ΔB‖` 量级不可控
+## P0-1 [fixed] Stage-5 风险损失与 L2 回归目标对抗，且 `‖ΔB‖` 量级不可控
 
 - **位置**：`resworld_head.py` loss（`loss_plan_risk` / `loss_plan_cvar` / `loss_plan_info`）
 - **现象（已由 [DIAG] 实证，2026-08-13 iter~100-200）**：
@@ -32,17 +32,20 @@
     `risk = σ·‖ΔB‖·boost` 直接把 σ 当乘法因子 → 风险场爆炸
   - `r_cmd = 0`（轨迹尚短未及遮挡区）——**一旦轨迹变长穿过遮挡区，
     `loss_plan_risk` 将立即以 ~10-50 量级主导训练，把轨迹强拉离 GT**
-- **建议**：
-  1. **σ 量级传染已修复**（2026-08-13，B 方案）：`build_risk_field` 中 σ 改用
-     `(σ/(1+σ)).detach()`（有界 [0,1) + 阻断梯度传染）——σ 只由校准损失负责，
-     风险场仅消费其相对量级
-  2. risk 三项权重降到 0.1 量级；或前 2-3 epoch 关闭 `use_risk_plan`（warmup）
-  3. 给 `‖ΔB‖` 做移动平均归一化，抑制量级漂移
-- **状态**：`partially fixed`（σ 传染已断；待新日志确认 rf 量级回落到 ~1 量级）
+- **修复（2026-08-13 + 2026-08-14）**：
+  1. σ 量级传染已断（B 方案）：`build_risk_field` 中 σ 改用
+     `(σ/(1+σ)).detach()`（有界 [0,1) + 阻断梯度传染）
+  2. risk 三项权重降到 0.1 量级（`loss_plan_risk/cvar = 0.1`、`loss_plan_info = 0.05`，
+     约为 `loss_plan_reg` 权重 10 的 1%），风险项成为软正则而非主导目标；
+     另有 `risk_plan_warmup_epochs=2` 冷启动关闭
+  3. `build_risk_field` 全量 detach（见 P0-2）后 ‖ΔB‖ 不再被 risk 项拉扯，
+     量级由 Stage-6 损失自然约束
+- **状态**：`fixed`（待服务器新日志确认 rf 量级回落 + `loss_plan_risk` 与
+  `loss_plan_reg` 相对量级 ~0.01-0.1）
 
 ---
 
-## P0-2 [open] 风险代理 `‖ΔB‖` 与 MHST 表达目标共享参数，三方梯度冲突
+## P0-2 [fixed] 风险代理 `‖ΔB‖` 与 MHST 表达目标共享参数，三方梯度冲突
 
 - **位置**：`resworld_head.py` `build_risk_field` + `OcclusionMHSTHead` + loss
 - **现象（预期）**：MHST 假设坍缩（ΔB→0，risk→0，Stage-5 形同虚设）或风险主导（轨迹劣化）
@@ -51,9 +54,11 @@
   - `L_div`：ΔB **彼此分离**（多样性）
   - `L_plan_risk`：`‖ΔB‖` **小**（降风险）
   模型的"作弊"出路是把遮挡区 ΔB 学小 → risk→0 且 MHST 表达力被毁。
-- **建议**：风险代理改用**与表达目标解耦**的度量（如 σ 单独驱动，或 ΔB 经 stop-gradient
-  后的归一化强度）；或降低 risk 权重使其成为"软正则"而非"主导目标"。
-- **状态**：`open`
+- **修复（2026-08-14）**：`build_risk_field` 开头对 pi / σ / ΔB / s_occ **全量 detach**——
+  风险场成为分布的无梯度**测量**（gradient contract 写入 docstring）：分布只由 Stage-6
+  自己的损失（似然/校准/多样性/占用）塑造，规划器经 `grid_sample` 的 grid 支路获得
+  风险场空间梯度、学习**避开**风险而非**篡改**风险。同时解决 P2-3 的 σ/π 竞争。
+- **状态**：`fixed`（待服务器验证：`loss_div` 维持非零、`rf_occ` 非平凡）
 
 ---
 
@@ -85,29 +90,32 @@
 
 ---
 
-## P1-1 [open] `loss_plan_info` 为负损失、无下界
+## P1-1 [fixed] `loss_plan_info` 为负损失、无下界
 
 - **位置**：`resworld_head.py` loss（`info = (r_ego - r_end).mean(); loss = -info`）
 - **现象（预期）**：`loss_plan_info` 持续下降（可转负且无下界），轨迹末端被持续推向
   "更低风险"方向，偏离 GT。
 - **原因**：`r_end < r_ego` 时（起点处于高遮挡区，常见）`info > 0` → `loss < 0`，
   优化器最小化负损失 → 轨迹末端不断远离遮挡。
-- **建议**：改为 hinge 形式 `max(0, r_end - r_ego)`（只惩罚"末端风险高于起点"），
-  或 `smooth` 变体；避免负损失无下界。
-- **状态**：`open`
+- **修复（2026-08-14）**：hinge 形式 `max(0, r_end - r_ego)`（只惩罚"末端风险高于起点"，
+  有下界 0，不再无限推离 GT）；`r_end` 取**最后有效步**（`fut_w` 累加定位），
+  不再取可能无效的 padded 末步。
+- **状态**：`fixed`（待日志确认 `loss_plan_info ≥ 0` 且不持续发散）
 
 ---
 
-## P1-2 [open] MHST 随机初始化在训练早期污染遮挡区特征
+## P1-2 [fixed] MHST 随机初始化在训练早期污染遮挡区特征
 
 - **位置**：`resworld_head.py` `OcclusionMHSTHead`（`_init_layers`）
 - **现象（预期）**：训练早期规划指标劣化
 - **原因**：prior/backbone/experts/sigma_net **随机初始化、无预训练、无 warmup**；
   早期遮挡区 `patch = pred_bev + Σπ·ΔB` 带随机扰动（‖ΔB‖~0.5），`col_attn` 在
   遮挡区采样到噪声特征。
-- **建议**：expert 输出层 zero-init（或小方差初始化）；或 warmup 期遮挡区暂退化为
-  确定性（门控权重从 0 线性升到 1）。
-- **状态**：`open`
+- **修复（2026-08-14）**：expert 输出卷积 **zero-init**（weight/bias 置零）——
+  初始 ΔB^k = 0 → 遮挡区 patch == pred_bev，**第 0 步输出与基线严格一致**，
+  假设在 Stage-6 损失下逐步生长（等价于"门控从 0 线性升到 1"建议的零参数实现）。
+  同源修复：Stage-2 `OcclusionAwareFusion` 亦 zero-init（见 P0-4）。
+- **状态**：`fixed`（待日志确认前 1-2 epoch 规划 loss 与基线量级一致）
 
 ---
 
@@ -133,28 +141,67 @@
 
 ---
 
-## P1-4 [open] 暴露损失梯度经 `pb` 反传，扭曲世界模型表征
+## P1-4 [fixed] 暴露损失梯度经 `pb` 反传，扭曲世界模型表征
 
 - **位置**：`resworld_head.py` loss（`b_hat = pb + Σπ·ΔB`，`b_k = pb + ΔB`）
 - **现象（预期）**：世界模型 latent 表征被"重建 next BEV"目标拉偏，弱化规划服务
 - **原因**：`L_occ_halluc` / `L_uncertainty` 的梯度经 `pb`（tokenfuser 输出的确定性
   未来 BEV）反传到 ResWorld 整个 latent 残差路径；且监督范围是**当前帧整个遮挡区**
   （很多格子 next 帧仍未暴露，无有效真值 → 监督噪声大）。
-- **建议**：暴露监督对 `pb` 分支 `stop_gradient`（只训练 MHST 的 ΔB/π/σ）；或用
-  next 帧真实暴露判定（加载 next 帧掩码）缩小监督范围。
-- **状态**：`open`
+- **修复（2026-08-14）**：
+  1. `b_hat` / `b_k` 中 `pb` 分支 **stop_gradient**（`pb.detach()`）——暴露损失只训练
+     MHST 头（π/ΔB/σ），确定性路径不受拉扯；
+  2. `e2` 整体 **detach**——`L_uncertainty` 中 σ 被校准到**固定误差目标**，消除
+     "σ↔e2 互相拉近"的自证预言循环（原实现 e2 经 ΔB 支路可被拉向 σ，校准失真）。
+  3. 监督范围仍为当前帧遮挡区（next 帧暴露判定为后续可选优化，见 P2-8）。
+- **状态**：`fixed`（待日志确认 `loss_occ_halluc` 冷启动不再异常主导）
+
+---
+
+## P0-4 [fixed] `OcclusionAwareFusion` 替换式注入同质化污染（新发现，2026-08-14）
+
+- **位置**：`resworld_head.py::OcclusionAwareFusion.forward`（Stage-2 注入）
+- **现象（代码审查）**：原实现 `B̃ = B⊙(1-M) + E_occ⊙M` 中 `E_occ` 由 1×1 Conv
+  从掩码通道生成——**无空间上下文**，遮挡区所有格子的嵌入几乎相同。当掩码过曝
+  （`occ_frac ≈ 0.42-0.48`，见 P1-3）时，近半 BEV 特征被替换为**同质随机向量**：
+  col_attn 在遮挡区采样到无差别噪声特征，且 `osz_fusion` 随机初始化使第 0 步即
+  劣于基线——**是"不如基线 ResWorld"的最大结构性风险源之一**（与 P0-3 并列）。
+- **修复（2026-08-14）**：改为**残差式注入** `B̃ = B + E_occ⊙M` + `osz_embed` **zero-init**：
+  - 训练第 0 步 `B̃ = B` 与基线**严格一致**；
+  - 保留遮挡区原始特征的空间信息，`E_occ` 只学"遮挡偏移"；
+  - 掩码质量差/过曝时退化为温和扰动而非特征抹除。
+  - 设计文档公式同步（OARWM_ResWorld.md §2/Stage 2、STATUS.md §1）。
+- **状态**：`fixed`（待训练日志对照 `abl_baseline` 臂 L2 曲线）
+
+---
+
+## P1-5 [fixed] `_rasterise_boxes_bev` 的 y 轴翻转（新发现，2026-08-14）
+
+- **位置**：`resworld_head.py::_rasterise_boxes_bev`（L_occ_gt 的占用 GT 栅格化）
+- **现象（代码审查）**：`y0 = (y_max - ys.max)/(y_max - y_min)*bev_h` 与 BEV 特征图
+  行序**镜像相反**——特征图行 0 = ego-y **最小**（`rcsample.py::create_grid_infos` /
+  `bevdet.py::gen_grid` 证实：行 i ↔ y = y_min + i·y_step），而该式把 y 最大映射到行 0。
+- **后果链**：`L_occ_gt` 的 GT 占用在 y 方向整体翻转 → `s_occ` 学到镜像占用 →
+  Stage-4 占用放大（γ·s_occ·M）放大**错误一侧**的格子 → 鬼探头感知错位，
+  `L_occ_gt` 的下降曲线看似正常（在错误位置拟合）。
+- **修复（2026-08-14）**：`y0/y1` 改用 `(ys - y_min)/(y_max - y_min)*bev_h`
+  （与特征图行序同约定，x 方向本就正确）；docstring 固化轴契约。
+- **状态**：`fixed`（待服务器验证：可视化 `occ_gt` 与图像中车辆位置一致）
 
 ---
 
 ## P2 [open] 次要问题
 
-| # | 问题 | 位置 | 建议 |
+| # | 问题 | 位置 | 建议/状态 |
 |---|---|---|---|
-| P2-1 | CVaR 的 `topk` 未应用 `fut_w`，无效轨迹步的风险被计入尾部 | `resworld_head.py` loss | `r_cmd` 乘 `fut_w` 后再 topk |
-| P2-2 | `grid_sample(align_corners=False)` 半格偏移，与 deformable attention 采样约定差 ~0.5 格 | `resworld_head.py` loss | 统一坐标约定或接受（小偏差） |
-| P2-3 | σ/π 多目标竞争：`L_plan_risk` 压 σ/π 小，`L_uncertainty`/`L_occ_halluc` 校准 σ/π | `resworld_head.py` loss | 明确 σ/π 的主监督目标，risk 项对 σ/π 分支 stop_gradient |
-| P2-4 | `L_div` 余弦相似度可负，假设负相关时 `loss_div<0` 无下界 | `resworld_head.py` loss | 权重已 0.1，影响有限；可 clamp 到 [0,1] |
+| P2-1 | CVaR 的 `topk` 未应用 `fut_w`，无效轨迹步的风险被计入尾部 | `resworld_head.py` loss | **fixed**（2026-08-14）：`r_cmd * fut_w` 后再 topk |
+| P2-2 | `grid_sample(align_corners=False)` 半格偏移，与 deformable attention 采样约定差 ~0.5 格 | `resworld_head.py` loss | **fixed**（2026-08-14）：两处采样改 `align_corners=True`（对齐 col_attn 像素中心语义） |
+| P2-3 | σ/π 多目标竞争：`L_plan_risk` 压 σ/π 小，`L_uncertainty`/`L_occ_halluc` 校准 σ/π | `resworld_head.py` loss | **fixed**（2026-08-14）：`build_risk_field` 全量 detach（P0-2），risk 项不再触碰 σ/π/ΔB/s_occ |
+| P2-4 | `L_div` 余弦相似度可负，假设负相关时 `loss_div<0` 无下界 | `resworld_head.py` loss | **fixed**（2026-08-14）：`clamp(min=0)`（已分离不奖励）+ 限定遮挡区计算（可见区 ΔB 不进入融合输出，推分假设纯属浪费且无对向监督） |
 | P2-5 | `L_occ_gt` 栅格化用轴对齐矩形近似旋转框 | `resworld_head.py` `_rasterise_boxes_bev` | 可接受（近似），或改旋转矩形栅格化 |
+| P2-6 | `_align_osz_mask` 用 `nearest` 做 200→100 下采样，掩码边界系统性偏移 0.5-1 格 | `resworld_head.py::_align_osz_mask` | open：可改 `adaptive_max_pool2d`（保守放大语义）或先下采样后转置；影响限于边界格，低优先级 |
+| P2-7 | `occ_head` 随机初始化 → `sigmoid≈0.5` → 训练早期风险场被常数 `(1+γ·0.5·M)` 放大，占用放大无意义 | `resworld_head.py` `build_risk_field` / `occ_head` | open：影响小（常数缩放，且已 detach）；可 zero-init occ_head 使初始放大为 1 |
+| P2-8 | 暴露监督范围 = 当前帧整个遮挡区，很多格子 next 帧仍未暴露（无有效真值）→ 监督噪声 | `resworld_head.py` loss | open：需加载 next 帧掩码做真实暴露判定（设计接口，见 P1-4） |
 
 ---
 
@@ -163,5 +210,9 @@
 - [ ] `loss_plan_risk / loss_plan_cvar / loss_plan_info` vs `loss_plan_reg` 相对量级（P0-1）
 - [ ] `grad_norm` 是否频繁触顶 35（P0-1）
 - [ ] `loss_occ_halluc` 冷启动值是否远大于其他损失（P1-4）
-- [ ] `loss_plan_info` 是否持续下降转负（P1-1）
-- [ ] 对照 `abl_baseline` 臂的 L2 曲线（全局基准）
+- [ ] `loss_plan_info` 是否 ≥ 0 且不持续发散（P1-1）
+- [ ] `loss_div` 是否维持非零（P0-2，detach 后假设不应坍缩）
+- [ ] 前 1-2 epoch 规划 loss 与基线量级一致（P1-2/P0-4 zero-init 生效）
+- [ ] 对照 `abl_baseline` 臂的 L2 曲线（全局基准；P0-4 残差式注入后主臂 L2 不应显著劣于基线）
+- [ ] `r_cmd_pos_frac` 显著上升、`loss_plan_risk/cvar/info` 有真实量级（P0-3 转置修复的服务器复验）
+- [ ] `occ_frac` 回落到合理水平（P1-3，待 `--use_drivable` 导出完成 + `use_osz_drivable=True`）

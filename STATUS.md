@@ -11,10 +11,10 @@
 | Stage | 改造内容 | 关键文件 | 开关 |
 |---|---|---|---|
 | **1 图像/BEV** | 继承 ResWorld（ResNet-50 + RCSample + BEV encoder），未改动 | — | — |
-| **2 显式遮挡几何** | OSZ 高度感知射线投射生成遮挡掩码并注入 BEV：`B̃ = B⊙(1-M) + E_occ⊙M`；双源（离线 npz / 在线同源）；torch GPU 后端；MiDaS v2.1 Small 深度 | `OSZ/`（config/ray_casting/depth_estimator/torch_pipeline 等）、`resworld_head.py::OcclusionAwareFusion`、`nuscenes_resworld_dataset.py` | `use_osz_midas`（离线）/ `use_osz_rcsample`（在线，互斥） |
+| **2 显式遮挡几何** | OSZ 高度感知射线投射生成遮挡掩码并注入 BEV：`B̃ = B + E_occ⊙M`（残差式，zero-init 起步等价基线，ISSUE P0-4）；双源（离线 npz / 在线同源）；torch GPU 后端；MiDaS v2.1 Small 深度 | `OSZ/`（config/ray_casting/depth_estimator/torch_pipeline 等）、`resworld_head.py::OcclusionAwareFusion`、`nuscenes_resworld_dataset.py` | `use_osz_midas`（离线）/ `use_osz_rcsample`（在线，互斥） |
 | **3 多假设 MHST** | 遮挡区 K 假设残差转移：先验网络（多尺度膨胀邻域）+ K expert 分支 + σ 不确定性；门控合成（可见区原值、遮挡区混合）；路径 A 期望输出 + aux 旁路 | `resworld_head.py::OcclusionMHSTHead` | `use_oarwm`、`mhst_k=5`、`mhst_sigma_min=0.1` |
-| **4 风险场** | 语义不可知双风险场：`R^(k)=w_σ·σ‖ΔB^(k)‖·M` → `R_exp`/`R_worst` → 不确定性+占用驱动放大（π 熵 U + s_occ 占用） | `resworld_head.py::build_risk_field` | `use_risk_field`、`risk_beta/w_sigma/gamma` |
-| **5 风险加权规划** | 风险场正则化预测轨迹（方案 A，非候选筛选）：沿程 R_worst（Minimax 语义）+ 沿程尾部 CVaR + 信息增益（起点-终点风险差） | `resworld_head.py::loss` | `use_risk_plan`、`loss_plan_risk/cvar/info_weight`、`cvar_beta` |
+| **4 风险场** | 语义不可知双风险场（无梯度测量，π/σ/ΔB/s_occ 全 detach，ISSUE P0-2/P2-3）：`R^(k)=w_σ·σ‖ΔB^(k)‖·M` → `R_exp`/`R_worst` → 不确定性+占用驱动放大（π 熵 U + s_occ 占用） | `resworld_head.py::build_risk_field` | `use_risk_field`、`risk_beta/w_sigma/gamma` |
+| **5 风险加权规划** | 风险场正则化预测轨迹（方案 A，非候选筛选）：沿程 R_worst（Minimax 语义）+ 沿程尾部 CVaR + 信息增益（hinge：末端风险高于起点，ISSUE P1-1） | `resworld_head.py::loss` | `use_risk_plan`、`loss_plan_risk/cvar/info_weight`、`cvar_beta` |
 | **6 端到端损失** | 遮挡暴露混合似然 `L_occ_halluc` + 检测框占用 `L_occ_gt`（pos_weight 防平凡解）+ 多样性 `L_div`（余弦）+ σ 校准 `L_uncertainty` + 规划 `L_plan`（含风险项）+ 信息增益 `L_info`；next 帧独立监督通道 | `resworld_head.py::loss`、`resworld.py::encode_next_bev`、`nuscenes_resworld_dataset.py`（`use_next`）、`loading.py`（next 帧处理） | 各损失权重（0=关） |
 
 **工程与基础**（贯穿各 Stage）：OSZ 网格对齐 ResWorld（200×200 各向异性，单一来源 `OSZ/config.py`）；`use_osz`/`use_oarwm` 条件实例化（开关关闭零参数，防 DDP 未使用参数）；移除 mock 合成数据（只接受真实 nuScenes）；RCSample 深度估计器与训练管线严格对齐（BICUBIC + config 断言）；`--depth-source {midas,rcsample,lidar}` 三臂；`--backend {numpy,torch,auto}` GPU 加速；`lr` 梯度裁剪等基线配置保持。
@@ -44,9 +44,9 @@ risk_gamma = 1.0           # 占用（s_occ）放大
 
 # ---- Stage 5 风险加权规划 ----
 use_risk_plan = True
-loss_plan_risk_weight = 1.0    # Minimax 语义（沿程 R_worst）
-loss_plan_cvar_weight = 1.0    # CVaR（沿程尾部）
-loss_plan_info_weight = 0.5    # 信息增益（主动感知）
+loss_plan_risk_weight = 0.1    # Minimax 语义（沿程 R_worst）——软正则（≈loss_plan_reg 权重 10 的 1%，ISSUE P0-1）
+loss_plan_cvar_weight = 0.1    # CVaR（沿程尾部，topk 前乘 fut_w，ISSUE P2-1）
+loss_plan_info_weight = 0.05   # 信息增益（hinge：末端风险高于起点才惩罚，ISSUE P1-1）
 cvar_beta = 0.25               # 风险尾部比例
 
 # ---- Stage 6 损失权重（0=关）----

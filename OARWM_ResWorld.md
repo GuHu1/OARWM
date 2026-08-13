@@ -43,7 +43,7 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
 │     │     └─► BEV 特征 B_t ∈ R^(H×W×C)
 │     └─► Stage 2: 显式遮挡几何注入 (新增 ★)
 │           ├─► OSZ 高度感知射线投射 → 遮挡掩码 M_t^occ ∈ {0,1}^(H×W) (osz_eye)
-│           └─► 遮挡感知 BEV 特征 B̃_t = B_t ⊙ (1-M_t^occ) + E_occ ⊙ M_t^occ
+│           └─► 遮挡感知 BEV 特征 B̃_t = B_t + E_occ ⊙ M_t^occ（残差式，zero-init 起步等价基线，见 ISSUE P0-4）
 │           ⬇ 传递: M_t^occ（逐层复用，4D 契约 (B,3,H,W)）
 │
 ├─► 分布层 (Stage 3): "可能是什么"
@@ -63,7 +63,7 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
 │     ├─► BEV Planner (继承 ResWorld, 单轨迹回归)
 │     ├─► 风险加权轨迹损失 L_plan_risk（沿程 R_worst, Minimax 语义）(新增)
 │     ├─► 沿程风险尾部 L_plan_cvar（CVaR 语义）(新增)
-│     └─► 信息增益奖励 L_plan_info = R_exp(ego) − R_exp(τ_T)（主动感知）(新增)
+│     └─► 信息增益奖励 L_plan_info = max(0, R_exp(τ_end) − R_exp(ego))（hinge，主动感知）(新增)
 │     └─► 预测轨迹 τ（风险规避, 非候选筛选）
 │
 └─► 自监督闭环 (Stage 6): 端到端训练
@@ -71,7 +71,7 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
       ├─► 多假设多样性损失 L_div（对抗 L_occ_halluc 静态偏置）
       ├─► 不确定性校准损失 L_uncertainty（σ 校准, 训练契约）
       ├─► 规划损失 L_plan = L_plan_reg + 风险加权项（含 L_info）
-      └─► 信息增益损失 L_info = −(R_exp(ego) − R_exp(τ_T))
+      └─► 信息增益损失 L_info = max(0, R_exp(τ_end) − R_exp(ego))（hinge）
 ```
 
 ---
@@ -132,8 +132,10 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
 6. **BEV 遮挡掩码**: 取 `osz_eye` 作为严格遮挡掩码：
    $$M_t^{occ}(x,y) = \text{osz\_eye}_t(x,y) \in \{0, 1\}^{H \times W}$$
 7. **遮挡感知 BEV 特征（OARWM 模型端实现）**: 特征注入不在 OSZ 模块内完成——OSZ 流水线输出 `bev_height`、`osz_ground`、`osz_eye`、`semi` 与 `drivable_mask`。OARWM 以掩码通道拼接为输入构建增强 BEV 特征：
-   $$\tilde{B}_t = B_t \odot (1 - M_t^{occ}) + E_{occ} \odot M_t^{occ}$$
-   其中 $E_{occ} \in \mathbb{R}^{C}$ 为可学习的遮挡类型嵌入（由掩码通道 `(osz_eye, osz_ground, semi)` 经 1×1 Conv 生成，区分严格盲区 / 半透明盲区 / 动态变化遮挡），通过广播与 BEV 特征逐元素相乘。
+   $$\tilde{B}_t = B_t + E_{occ} \odot M_t^{occ}$$
+   其中 $E_{occ} \in \mathbb{R}^{C}$ 为可学习的遮挡类型偏移（由掩码通道 `(osz_eye, osz_ground, semi)` 经 1×1 Conv 生成，区分严格盲区 / 半透明盲区 / 动态变化遮挡），通过广播与 BEV 特征逐元素相乘。
+   
+   **残差式 + zero-init（2026-08 修订，ISSUE P0-4）**：注入由初稿的替换式 $B_t \odot (1-M) + E_{occ} \odot M$ 改为**残差式** $B_t + E_{occ} \odot M$，且 `osz_embed` 卷积 zero-init——训练第 0 步 $\tilde{B}_t = B_t$ 与基线严格一致，遮挡区原始特征的空间信息保留，$E_{occ}$ 只学习"遮挡偏移"。原因：替换式下 1×1 Conv 生成的嵌入无空间上下文，掩码过曝时（occ_frac≈45%）近半 BEV 特征被同质随机向量替换，col_attn 采样到无差别噪声，必然劣于基线。
 
 **输出**: OSZ 模块输出 `bev_height`、`osz_ground`、`osz_eye`、`semi`、`drivable_mask`（200×200，与 ResWorld 网格同格）；OARWM 模型端输出遮挡感知 BEV 特征 $\tilde{B}_t$（`OcclusionAwareFusion`）。
 
@@ -225,6 +227,8 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 1. **多假设风险分解（语义不可知代理）**: 对每个假设 $k$，在遮挡区内生成风险图：
    $$R^{(k)}(x,y) = w_\sigma \cdot \sigma(x,y) \cdot \big\| \Delta B^{(k)}(x,y) \big\|_2 \cdot \mathbb{1}[\,M_t^{occ}(x,y)\,]$$
    其中 $\|\Delta B^{(k)}\|_2$ 是该假设预测的**内容变化强度**（feature-space 碰撞威胁代理），$\sigma$ 为不确定性加权，$w_\sigma$ 为尺度超参。**不依赖语义解码**——理由见"为何如此设计"1；语义解码器为**可选消融臂**（见下），`RiskWeight(c)` 类别加权公式移入附录 A。
+   
+   **梯度契约（2026-08 修订，ISSUE P0-2/P2-3）**：风险场是分布的**无梯度测量**——实现中 $\pi, \sigma, \Delta B^{(k)}, s_{occ}$ 在进入风险场前全部 detach。分布只由 Stage 6 自己的损失（似然/校准/多样性/占用）塑造；规划器经 `grid_sample` 的采样坐标支路获得风险场空间梯度，学习**避开**风险而非**篡改**风险（否则"把 ΔB 学小 → risk→0"的作弊解会同时摧毁 MHST 表达力与 Stage 5）。σ 的绝对量级已由 $L_{uncertainty}$ 校准到特征误差量级，故实现用有界变换 $\sigma/(1+\sigma)$ 消费其相对量级（ISSUE P0-1）。
 
 2. **双输出保留多假设（对齐 Stage 5）**:
    $$R_{\text{exp}}(x,y) = \sum_{k=1}^K \pi_k(x,y)\, R^{(k)}(x,y), \qquad R_{\text{worst}}(x,y) = \max_{k} R^{(k)}(x,y)$$
@@ -272,9 +276,9 @@ $$\text{CVaR}_\beta = \text{mean}\big(\text{top}_{\lceil \beta T \rceil}\{R_{\te
 
 以"沿轨迹风险下降"度量主动感知——自车当前位置（ego 原点）风险 vs 轨迹末端风险：
 
-$$r_{\text{info}} = R_{\text{exp}}(\text{ego}) - R_{\text{exp}}(\tau_T), \qquad L_{\text{plan\_info}} = -r_{\text{info}}$$
+$$L_{\text{plan\_info}} = \max\big(0,\ R_{\text{exp}}(\tau_{\text{end}}) - R_{\text{exp}}(\text{ego})\big)$$
 
-鼓励轨迹朝"降低遮挡不确定性"的方向走（风险回落 = 主动探测，闭环于 Stage 3.4 信念修正；单帧近似，T 步 rollout 为设计接口）。
+只惩罚"**末端风险高于起点**"（hinge 形式，2026-08 修订，ISSUE P1-1）——初稿 $L = -\big(R_{\text{exp}}(\text{ego}) - R_{\text{exp}}(\tau_T)\big)$ 无下界（起点处于高遮挡区时持续转负），会无限推离 GT。hinge 保留"鼓励朝风险降低方向走"的语义（末端风险 ≤ 起点即零惩罚），$\tau_{\text{end}}$ 取**最后有效步**（`fut_w` 定位）。闭环于 Stage 3.4 信念修正；单帧近似，T 步 rollout 为设计接口。
 
 #### 5.4 总规划目标
 
@@ -319,19 +323,23 @@ $$L_{\text{occ\_gt}} = \sum_{(x,y) \in \mathcal{O}_t} \text{BCE}\big(s_{\text{oc
 $$L_{\text{div}} = \frac{2}{K(K-1)} \sum_{k_1 < k_2} \cos\big(\Delta B^{(k_1)},\, \Delta B^{(k_2)}\big) \cdot w_{\text{div}}$$
 最小化假设残差间的余弦相似度（鼓励方向分离），替代 KL 伪分布（MHST 假设是特征残差非分布）。
 
+**实现修订（2026-08，ISSUE P2-4）**：(a) **只在遮挡区计算**——可见区 ΔB 不进入融合输出（门控合成），推开可见区假设纯属浪费容量且无对向监督；(b) **clamp 到 ≥ 0**——负相似度（已分离）不奖励，损失有下界。
+
 #### 6.4 不确定性校准损失 (新增)
 
 确保遮挡区预测的不确定性与实际误差匹配（**训练契约**：Stage 3 的 σ 语义由本节兑现；实现中 Σ 为标量 σ = softplus(s) + Σ_min，与 `sigma_net` 对接）：
 $$L_{\text{uncertainty}} = \sum_{(x,y) \in \mathcal{O}_t} \left| \sigma_{(x,y)} - \|e_{(x,y)}\|^2 \right|$$
 其中 $e_{(x,y)} = \hat{B}_{t+1}(x,y) - B_{t+\Delta t}^{\text{gt}}(x,y)$ 为**遮挡暴露误差**——与 6.2 的 $L_{\text{occ\_halluc}}$ **共享同一份暴露数据**（零额外成本）。σ 同时在 6.2 混合似然中作分布带宽被隐式监督、在本节被显式校准为预期误差，两者方向一致（误差大的位置 σ 大）。
 
+**实现修订（2026-08，ISSUE P1-4）**：$e^2$ 作为 σ 的**固定校准目标 detach**——不 detach 时 $\sigma$ 与 $e^2$ 经 $\Delta B$ 支路互相拉近（自证预言循环），校准失真；且 $\hat{B}_{t+1}$ 中确定性分支 $pb$ 同样 stop-gradient，暴露损失只训练 MHST 头（π/ΔB/σ）。
+
 #### 6.5 规划损失 (继承 + 改进)
 $$L_{\text{plan}} = L_{\text{plan\_reg}} + \lambda_{\text{risk}} L_{\text{plan\_risk}} + \lambda_{\text{CVaR}} L_{\text{plan\_cvar}} + \lambda_{\text{info}} L_{\text{plan\_info}}$$
 其中 $L_{\text{plan\_reg}}$ 为 ResWorld 原有 L1 轨迹回归，新增三项为 Stage 5 的风险加权规划（见 §5.1-5.3，`use_risk_plan` 开关，0=关即基线）。
 
 #### 6.6 信息增益损失 (新增，即 §5.3 的 $L_{\text{plan\_info}}$)
-$$L_{\text{info}} = -r_{\text{info}} = -\big(R_{\text{exp}}(\text{ego}) - R_{\text{exp}}(\tau_T)\big)$$
-鼓励轨迹朝"降低遮挡不确定性"的方向走（风险回落 = 主动探测，单帧近似，T 步 rollout 为设计接口）。
+$$L_{\text{info}} = \max\big(0,\ R_{\text{exp}}(\tau_{\text{end}}) - R_{\text{exp}}(\text{ego})\big)$$
+鼓励轨迹朝"降低遮挡不确定性"的方向走（hinge：末端风险 ≤ 起点即零惩罚，有下界；2026-08 修订，ISSUE P1-1；单帧近似，T 步 rollout 为设计接口）。
 
 #### 6.7 总体损失
 $$L_{\text{total}} = \omega_2 L_{\text{occ\_halluc}} + \omega_2' L_{\text{occ\_gt}} + \omega_3 L_{\text{div}} + \omega_4 L_{\text{uncertainty}} + \omega_5 L_{\text{plan}}$$

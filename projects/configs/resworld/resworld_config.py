@@ -52,9 +52,14 @@ assert (not use_risk_field) or use_oarwm, \
 
 # --- Stage-5 risk-weighted planning (approach A: no candidate selection) ---
 use_risk_plan = True             # False = skip risk-weighted planning losses
-loss_plan_risk_weight = 1.0      # minimax-style mean step risk on the trajectory
-loss_plan_cvar_weight = 1.0      # CVaR of the step-risk tail
-loss_plan_info_weight = 0.5      # info gain (start-vs-end risk drop, active sensing)
+# P0-1 (2026-08): the risk terms are soft regularisers at ~0.1 of
+# loss_plan_reg (L1 weight 10.0) so the risk field steers the trajectory
+# without overpowering the GT regression (ISSUE.md P0-1 suggestion 2).
+# Combined with risk_plan_warmup_epochs=2 and the build_risk_field detach
+# (P0-2), the risk terms can no longer dominate training.
+loss_plan_risk_weight = 0.1      # minimax-style mean step risk (soft regulariser)
+loss_plan_cvar_weight = 0.1      # CVaR of the step-risk tail (soft regulariser)
+loss_plan_info_weight = 0.05     # info gain (hinge: end risk above start)
 cvar_beta = 0.25                 # CVaR tail fraction of the trajectory steps
 assert (not use_risk_plan) or use_risk_field, \
     'use_risk_plan (Stage 5) requires use_risk_field (Stage 4)'
