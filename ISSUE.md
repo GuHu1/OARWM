@@ -90,6 +90,37 @@
 
 ---
 
+## P0-5 [fixed] 训练爆炸实录（2026-08-13）：僵尸假设 + `R_worst = max_k` 无界级联
+
+- **位置**：`resworld_head.py`（`OcclusionMHSTHead` 的 ΔB/σ 无上界 + `build_risk_field` 的 `R_worst = max_k R^(k)` + Stage-5 风险项）
+- **现象（服务器训练日志 2026-08-13 12:47 起，代码 = 4a26e25 含 P1-4/P0-2 全部修复；epoch 1 iter 3200 突变，此后指数爆炸）**：
+  - `loss_uncertainty`: 0.07–0.6（iter 100–3100 正常）→ 43666（3200）→ 3.6M → 82M → 495M → epoch 2 达 1e13–1e16
+  - `rf_mean/rf_occ`: 2–6 / 8–20 → 11866 / 37312 → 5e6 / 1e10；`grad_norm` 18–48 → 1348 → 1e10
+  - 连带：`loss_plan_reg` 0.6 → 42 → 18099（轨迹被拉爆）；`occ_frac` 0.44 → 0.9（深度头被污染）
+- **排除项（重要）**：初判"e² 支路"不成立——4a26e25 中 e² 已 detach，`loss_uncertainty` 对 ΔB 无梯度。
+- **机制（由日志数据自洽性反推，2026-08-13 晚确认）**：
+  1. **僵尸假设**：K 个假设中，后验权重 $w_k = \text{softmax}(\log\pi_k + \log p_k)$ 趋零的假设，
+     其 `L_occ_halluc` 梯度 $\propto w_k$ → 该假设的 **ΔB 失去曝光似然监督**；
+     `L_div`（单位化余弦）与 risk 项（已 detach）对 ΔB **模长均无梯度** → ΔB 模长自由漂移；
+  2. **`R_worst = max_k` 无界**：僵尸假设的巨大 ‖ΔB‖ 直接进入 R_worst（Minimax 语义不乘 π）→ rf 无界。
+     日志自洽性验证（iter 3200）：`e2 ≈ 4.4e4`（混合误差 ≈209，主导假设正常）而
+     `rf_occ = 37312 ≈ 0.09×‖ΔB‖×2` → 僵尸假设 **‖ΔB‖ ≈ 2e5**；
+  3. **级联点燃**：rf 巨大 → `loss_plan_risk/cvar/info` 梯度 ∝ rf 值 → 轨迹/col_attn/pred_bev 被推乱 →
+     `loss_plan_reg` 爆炸 → L1 梯度经 fused 对 π 的梯度 ∝ ΔB（巨大）→ prior 网络被推乱 →
+     更多假设变僵尸 → 指数化（grad_norm 1348→1e10 吻合）。
+- **修复（2026-08-13，P0-6 硬限幅三件套）**：
+  1. `OcclusionMHSTHead`：`delta.clamp(±mhst_delta_clamp=10.0)`（正常每元素 ~1-3，4 倍余量）——
+     僵尸假设的 ‖ΔB‖ 有界；
+  2. `sigma.clamp(max=mhst_sigma_max=10.0)` + loss 中 `e2.clamp(max=mhst_sigma_max)`——
+     σ/var 有界，似然对 ΔB 的约束（梯度 ∝ 1/var）不失效，`loss_uncertainty` 数值有界；
+  3. `build_risk_field` 输出 `clamp(max=risk_clamp=100.0)`（正常 rf ~1-20，5 倍余量）——
+     风险项梯度有界，级联截断。
+  三者均为"正常区零影响、极端区饱和"的硬限幅；Minimax 语义保留（仍是 over-K max，
+  只是每个假设的 ΔB 表达被限幅——特征残差有物理量级，限幅合理）。
+- **状态**：`fixed`（待服务器重训验证：`loss_uncertainty` 无指数增长、rf 有界、`grad_norm` 回落）
+
+---
+
 ## P1-1 [fixed] `loss_plan_info` 为负损失、无下界
 
 - **位置**：`resworld_head.py` loss（`info = (r_ego - r_end).mean(); loss = -info`）
@@ -207,12 +238,13 @@
 
 ## 验证清单（等训练日志）
 
+- [ ] **`loss_uncertainty` 不出现指数增长**（P0-5：4a26e25 在 iter 3200 起 43666→1e16 爆炸；P0-6 限幅后应稳定 ~0.1–1，`rf_occ` ≤ risk_clamp）
 - [ ] `loss_plan_risk / loss_plan_cvar / loss_plan_info` vs `loss_plan_reg` 相对量级（P0-1）
-- [ ] `grad_norm` 是否频繁触顶 35（P0-1）
+- [ ] `grad_norm` 是否频繁触顶 35（P0-1/P0-5：爆炸时 1348→1e10，修复后应回落）
 - [ ] `loss_occ_halluc` 冷启动值是否远大于其他损失（P1-4）
 - [ ] `loss_plan_info` 是否 ≥ 0 且不持续发散（P1-1）
 - [ ] `loss_div` 是否维持非零（P0-2，detach 后假设不应坍缩）
 - [ ] 前 1-2 epoch 规划 loss 与基线量级一致（P1-2/P0-4 zero-init 生效）
 - [ ] 对照 `abl_baseline` 臂的 L2 曲线（全局基准；P0-4 残差式注入后主臂 L2 不应显著劣于基线）
 - [ ] `r_cmd_pos_frac` 显著上升、`loss_plan_risk/cvar/info` 有真实量级（P0-3 转置修复的服务器复验）
-- [ ] `occ_frac` 回落到合理水平（P1-3，待 `--use_drivable` 导出完成 + `use_osz_drivable=True`）
+- [ ] `occ_frac` 回落到合理水平（P1-3，待 `--use_drivable` 导出完成 + `use_osz_drivable=True`；旧日志爆炸后 occ_frac 一度达 0.9）

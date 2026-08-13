@@ -12,8 +12,8 @@
 |---|---|---|---|
 | **1 图像/BEV** | 继承 ResWorld（ResNet-50 + RCSample + BEV encoder），未改动 | — | — |
 | **2 显式遮挡几何** | OSZ 高度感知射线投射生成遮挡掩码并注入 BEV：`B̃ = B + E_occ⊙M`（残差式，zero-init 起步等价基线，ISSUE P0-4）；双源（离线 npz / 在线同源）；torch GPU 后端；MiDaS v2.1 Small 深度 | `OSZ/`（config/ray_casting/depth_estimator/torch_pipeline 等）、`resworld_head.py::OcclusionAwareFusion`、`nuscenes_resworld_dataset.py` | `use_osz_midas`（离线）/ `use_osz_rcsample`（在线，互斥） |
-| **3 多假设 MHST** | 遮挡区 K 假设残差转移：先验网络（多尺度膨胀邻域）+ K expert 分支 + σ 不确定性；门控合成（可见区原值、遮挡区混合）；路径 A 期望输出 + aux 旁路 | `resworld_head.py::OcclusionMHSTHead` | `use_oarwm`、`mhst_k=5`、`mhst_sigma_min=0.1` |
-| **4 风险场** | 语义不可知双风险场（无梯度测量，π/σ/ΔB/s_occ 全 detach，ISSUE P0-2/P2-3）：`R^(k)=w_σ·σ‖ΔB^(k)‖·M` → `R_exp`/`R_worst` → 不确定性+占用驱动放大（π 熵 U + s_occ 占用） | `resworld_head.py::build_risk_field` | `use_risk_field`、`risk_beta/w_sigma/gamma` |
+| **3 多假设 MHST** | 遮挡区 K 假设残差转移：先验网络（多尺度膨胀邻域）+ K expert 分支 + σ 不确定性；门控合成（可见区原值、遮挡区混合）；路径 A 期望输出 + aux 旁路；**P0-6 硬限幅**：ΔB clamp ±10、σ cap 10（僵尸假设防爆，ISSUE P0-5） | `resworld_head.py::OcclusionMHSTHead` | `use_oarwm`、`mhst_k=5`、`mhst_sigma_min=0.1`、`mhst_delta_clamp`、`mhst_sigma_max` |
+| **4 风险场** | 语义不可知双风险场（无梯度测量，π/σ/ΔB/s_occ 全 detach，ISSUE P0-2/P2-3）：`R^(k)=w_σ·σ‖ΔB^(k)‖·M` → `R_exp`/`R_worst` → 不确定性+占用驱动放大（π 熵 U + s_occ 占用）；**P0-6 输出 clamp**（risk_clamp=100，风险项梯度有界） | `resworld_head.py::build_risk_field` | `use_risk_field`、`risk_beta/w_sigma/gamma`、`risk_clamp` |
 | **5 风险加权规划** | 风险场正则化预测轨迹（方案 A，非候选筛选）：沿程 R_worst（Minimax 语义）+ 沿程尾部 CVaR + 信息增益（hinge：末端风险高于起点，ISSUE P1-1） | `resworld_head.py::loss` | `use_risk_plan`、`loss_plan_risk/cvar/info_weight`、`cvar_beta` |
 | **6 端到端损失** | 遮挡暴露混合似然 `L_occ_halluc` + 检测框占用 `L_occ_gt`（pos_weight 防平凡解）+ 多样性 `L_div`（余弦）+ σ 校准 `L_uncertainty` + 规划 `L_plan`（含风险项）+ 信息增益 `L_info`；next 帧独立监督通道 | `resworld_head.py::loss`、`resworld.py::encode_next_bev`、`nuscenes_resworld_dataset.py`（`use_next`）、`loading.py`（next 帧处理） | 各损失权重（0=关） |
 

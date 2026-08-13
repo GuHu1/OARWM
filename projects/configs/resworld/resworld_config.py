@@ -38,6 +38,15 @@ use_osz = use_osz_midas or use_osz_rcsample
 use_oarwm = True
 mhst_k = 5            # hypotheses K (ablation 5.2-2: 1 / 3 / 5 / 10)
 mhst_sigma_min = 0.1  # occluded-cell uncertainty lower bound Σ_min
+# P0-6 hard bounds (2026-08): zombie-hypothesis explosion guard. A
+# hypothesis whose posterior collapses to ~0 loses its exposure-supervision
+# gradient and its dB drifts upward freely; R_worst = max_k then inherits
+# the unbounded magnitude (2026-08-13 training explosion). Normal ||dB|| per
+# element ~1-3 (||dB||_2 ~16-40) and sigma ~0.1-1, so these caps leave
+# ~4-10x headroom. risk_clamp bounds the planner's risk gradients, which
+# scale with the field value (set None to disable).
+mhst_delta_clamp = 10.0   # per-element cap on dB^(k)
+mhst_sigma_max = 10.0     # sigma upper bound (also caps the e2 target)
 assert (not use_oarwm) or use_osz, \
     'use_oarwm (Stage 3 MHST) requires a mask source: ' \
     'set use_osz_midas or use_osz_rcsample'
@@ -47,6 +56,7 @@ use_risk_field = True     # False = skip the risk field (pure MHST forward)
 risk_beta = 2.0           # uncertainty-driven boost upper bound (β)
 risk_w_sigma = 1.0        # σ scaling in the risk proxy (w_σ)
 risk_gamma = 1.0          # occupancy-driven boost weight (γ, on s_occ·M)
+risk_clamp = 100.0        # risk-field upper bound (normal ~1-20; 5x headroom)
 assert (not use_risk_field) or use_oarwm, \
     'use_risk_field (Stage 4) requires use_oarwm (Stage 3)'
 
@@ -208,10 +218,13 @@ model = dict(
         use_oarwm=use_oarwm,  # Stage-3 MHST head (plan B)
         mhst_k=mhst_k,
         mhst_sigma_min=mhst_sigma_min,
+        mhst_delta_clamp=mhst_delta_clamp,  # P0-6 bound
+        mhst_sigma_max=mhst_sigma_max,      # P0-6 bound
         use_risk_field=use_risk_field,  # Stage-4 risk field
         risk_beta=risk_beta,
         risk_w_sigma=risk_w_sigma,
         risk_gamma=risk_gamma,
+        risk_clamp=risk_clamp,           # P0-6 bound
         loss_div_weight=loss_div_weight,
         loss_occ_halluc_weight=loss_occ_halluc_weight,
         loss_uncertainty_weight=loss_uncertainty_weight,

@@ -133,7 +133,7 @@ class OcclusionAwareFusion(nn.Module):
 
 
 def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0,
-                     s_occ=None, gamma=1.0):
+                     s_occ=None, gamma=1.0, risk_clamp=100.0):
     """Stage-4 occlusion-aware risk field (semantic-agnostic proxy, no params).
 
     Consumes the MHST aux outputs (design doc Stage 4):
@@ -157,6 +157,17 @@ def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0,
     the distribution. The planner still receives gradient through the
     grid_sample GRID (spatial derivative of the risk field), so it learns to
     AVOID risk instead of erasing it.
+
+    Bounded risk (ISSUE.md P0-6, fixed 2026-08): the field is clamped to
+    ``risk_clamp`` (normal operating range is ~1-20, clamp at 100 leaves 5x
+    headroom). A hypothesis whose posterior weight collapsed to ~0 (a
+    "zombie hypothesis") loses its exposure-supervision gradient, so its
+    ||dB|| can drift upward freely; R_worst = max_k would then inherit that
+    unbounded magnitude and the risk-weighted planning losses (whose
+    gradients scale with the field value) would cascade-explode the
+    trajectory and the prior network (see the 2026-08-13 training log).
+    The clamp keeps the planner's risk gradients bounded; per-hypothesis
+    ||dB|| is separately capped by ``delta_clamp`` in OcclusionMHSTHead.
 
     Returns ``(B, 2, H, W)`` = ``[R~_exp, R~_worst]``. All-zero mask -> 0 risk.
     K=1: pi == 1 so H(pi) == 0 and U == 0 (no multi-hypothesis uncertainty).
@@ -193,7 +204,12 @@ def build_risk_field(pi, sigma, delta, mask, beta=2.0, w_sigma=1.0,
         boost = boost * (1.0 + gamma * s_occ[:, 0] * m[:, 0])
     r_exp = r_exp * boost
     r_worst = r_worst * boost
-    return torch.stack([r_exp, r_worst], dim=1)       # (B,2,H,W)
+    field = torch.stack([r_exp, r_worst], dim=1)       # (B,2,H,W)
+    if risk_clamp is not None and risk_clamp > 0:
+        # ISSUE P0-6: bound the field so the risk-weighted planning
+        # gradients (which scale with the field value) stay bounded.
+        field = field.clamp(max=risk_clamp)
+    return field
 
 
 class OcclusionMHSTHead(nn.Module):
@@ -224,10 +240,21 @@ class OcclusionMHSTHead(nn.Module):
     """
 
     def __init__(self, in_channels, k=3, sigma_min=0.1, mask_channels=3,
-                 hidden=128):
+                 hidden=128, delta_clamp=10.0, sigma_max=10.0):
         super(OcclusionMHSTHead, self).__init__()
         self.k = k
         self.sigma_min = sigma_min
+        # ISSUE P0-6 (2026-08): hard bounds on the hypothesis residuals and
+        # the uncertainty. A hypothesis whose posterior weight collapses to
+        # ~0 loses its exposure-supervision gradient, so its dB drifts
+        # upward freely and R_worst = max_k inherits the unbounded magnitude
+        # (2026-08-13 training explosion). Normal ||dB|| per element is
+        # ~1-3 (||dB||_2 ~ 16-40); clamp at +-10 leaves ~4x headroom.
+        self.delta_clamp = delta_clamp
+        # Normal sigma is ~0.1-1 (calibrated to the exposure error); the
+        # cap keeps var bounded so the mixture-likelihood constraint on dB
+        # (gradient ~ 1/var) never fades.
+        self.sigma_max = sigma_max
 
         # g_prior: mask + BEV context -> pi over K hypotheses.
         # Multi-scale dilated neighbourhood (dilation 1/2/4 -> receptive
@@ -277,11 +304,15 @@ class OcclusionMHSTHead(nn.Module):
         h = self.backbone(pred_bev)           # (B, hidden, H, W)
         delta = torch.stack(
             [expert(h) for expert in self.experts], dim=1)  # (B, K, C, H, W)
+        if self.delta_clamp is not None and self.delta_clamp > 0:
+            delta = delta.clamp(min=-self.delta_clamp, max=self.delta_clamp)
 
         occ = pred_bev.unsqueeze(1) + delta   # (B, K, C, H, W)
         patch = (occ * pi.unsqueeze(2)).sum(dim=1)          # (B, C, H, W)
 
         sigma = F.softplus(self.sigma_net(h)) + self.sigma_min
+        if self.sigma_max is not None and self.sigma_max > 0:
+            sigma = sigma.clamp(max=self.sigma_max)
 
         fused = pred_bev * (1 - m) + patch * m
         aux = {'pi': pi, 'sigma': sigma, 'delta': delta}
@@ -318,11 +349,16 @@ class ResWorldHead(BaseModule):
                  use_oarwm=False,
                  mhst_k=3,
                  mhst_sigma_min=0.1,
+                 # ISSUE P0-6 (2026-08): hard bounds against the
+                 # zombie-hypothesis explosion (see build_risk_field).
+                 mhst_delta_clamp=10.0,
+                 mhst_sigma_max=10.0,
                  # Stage-4 risk field (semantic-agnostic proxy, no params).
                  use_risk_field=False,
                  risk_beta=2.0,
                  risk_w_sigma=1.0,
                  risk_gamma=1.0,
+                 risk_clamp=100.0,
                  # Stage-6 loss weights (0 disables the term).
                  loss_div_weight=0.1,
                  loss_occ_halluc_weight=1.0,
@@ -378,10 +414,13 @@ class ResWorldHead(BaseModule):
         self.use_oarwm = use_oarwm
         self.mhst_k = mhst_k
         self.mhst_sigma_min = mhst_sigma_min
+        self.mhst_delta_clamp = mhst_delta_clamp
+        self.mhst_sigma_max = mhst_sigma_max
         self.use_risk_field = use_risk_field
         self.risk_beta = risk_beta
         self.risk_w_sigma = risk_w_sigma
         self.risk_gamma = risk_gamma
+        self.risk_clamp = risk_clamp
         # Stage-6 loss weights (per-term switch via weight=0).
         self.loss_div_weight = loss_div_weight
         self.loss_occ_halluc_weight = loss_occ_halluc_weight
@@ -426,7 +465,9 @@ class ResWorldHead(BaseModule):
         if self.use_oarwm:
             self.mhst = OcclusionMHSTHead(
                 self.in_channels, k=self.mhst_k,
-                sigma_min=self.mhst_sigma_min)
+                sigma_min=self.mhst_sigma_min,
+                delta_clamp=self.mhst_delta_clamp,
+                sigma_max=self.mhst_sigma_max)
             if self.loss_occ_gt_weight > 0:
                 # Occlusion occupancy head for L_occ_gt (dynamic content
                 # supervision from rasterised detection-box GT).
@@ -615,7 +656,8 @@ class ResWorldHead(BaseModule):
             risk_field = build_risk_field(
                 mhst_aux['pi'], mhst_aux['sigma'], mhst_aux['delta'],
                 rf_mask, beta=self.risk_beta, w_sigma=self.risk_w_sigma,
-                s_occ=mhst_aux.get('s_occ'), gamma=self.risk_gamma)
+                s_occ=mhst_aux.get('s_occ'), gamma=self.risk_gamma,
+                risk_clamp=self.risk_clamp)
 
         way_point = self.col_attn(
                 query=way_point,
@@ -750,8 +792,12 @@ class ResWorldHead(BaseModule):
                 # mutual-pull loop: |sigma - e2| with a live e2 would drag
                 # the error toward sigma instead of calibrating sigma to it).
                 b_hat = pb.detach() + (pi.unsqueeze(2) * delta).sum(dim=1)
+                # P0-6: cap the calibration TARGET at sigma_max — an outlier
+                # exposure error must not drag the |sigma - e2| magnitude
+                # (and the sigma it calibrates) to arbitrary values; sigma
+                # is separately capped at sigma_max in OcclusionMHSTHead.
                 e2 = (b_hat.detach() - gt_next).pow(2).mean(
-                    dim=1, keepdim=True)
+                    dim=1, keepdim=True).clamp(max=self.mhst_sigma_max)
 
                 # 6.2 L_occ_halluc: negative log mixture likelihood over the
                 # occluded cells (EM-style fit of pi / delta / sigma).
