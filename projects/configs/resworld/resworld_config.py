@@ -236,6 +236,11 @@ model = dict(
         loss_plan_info_weight=loss_plan_info_weight,
         cvar_beta=cvar_beta,
         risk_plan_warmup_epochs=2,  # risk terms off for epochs 0-1 (P0-1/P1-2)
+        # Linear ramp of risk weights after warmup (0 -> 1 over N epochs):
+        # the hard switch made loss_plan_reg spike 0.53 -> 1.24 at the
+        # activation epoch (2026-08-13/14 log); the ramp lets reg settle
+        # smoothly (expected final: reg slightly above init, ~5%).
+        risk_plan_ramp_epochs=2,
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,

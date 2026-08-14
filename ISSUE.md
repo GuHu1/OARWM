@@ -40,8 +40,13 @@
      另有 `risk_plan_warmup_epochs=2` 冷启动关闭
   3. `build_risk_field` 全量 detach（见 P0-2）后 ‖ΔB‖ 不再被 risk 项拉扯，
      量级由 Stage-6 损失自然约束
+  4. **risk ramp（2026-08-14）**：`risk_plan_ramp_epochs=2`——warmup 结束后 risk
+     权重线性 0→1 爬升。硬切换曾使 `loss_plan_reg` 在激活 epoch 从 0.53 跳 1.24；
+     ramp 后平缓过渡。**预期权衡**：激活后 `loss_plan_reg` 略高于
+     `loss_plan_reg_init`（~5%，risk 梯度只作用 final 轨迹路径）是设计预期的
+     "保守 vs 模仿"代价，最终以评估 L2/碰撞率为准
 - **状态**：`fixed`（待服务器新日志确认 rf 量级回落 + `loss_plan_risk` 与
-  `loss_plan_reg` 相对量级 ~0.01-0.1）
+  `loss_plan_reg` 相对量级 ~0.01-0.1 + reg/init 差距稳定 ~5% 无跳变）
 
 ---
 
@@ -238,8 +243,9 @@
 
 ## 验证清单（等训练日志）
 
-- [ ] **`loss_uncertainty` 不出现指数增长**（P0-5：4a26e25 在 iter 3200 起 43666→1e16 爆炸；P0-6 限幅后应稳定 ~0.1–1，`rf_occ` ≤ risk_clamp）
+- [ ] **`loss_uncertainty` 不出现指数增长**（P0-5：4a26e25 在 iter 3200 起 43666→1e16 爆炸；P0-6 限幅后应稳定 ~0.1–1，`rf_occ` ≤ 2×risk_clamp）
 - [ ] `loss_plan_risk / loss_plan_cvar / loss_plan_info` vs `loss_plan_reg` 相对量级（P0-1）
+- [ ] **`loss_plan_reg` vs `loss_plan_reg_init`**（P0-1 权衡指标：risk 激活后 reg 略高于 init ~5% 属预期；ramp 后激活 epoch 不应再有 0.53→1.24 式跳变）
 - [ ] `grad_norm` 是否频繁触顶 35（P0-1/P0-5：爆炸时 1348→1e10，修复后应回落）
 - [ ] `loss_occ_halluc` 冷启动值是否远大于其他损失（P1-4）
 - [ ] `loss_plan_info` 是否 ≥ 0 且不持续发散（P1-1）

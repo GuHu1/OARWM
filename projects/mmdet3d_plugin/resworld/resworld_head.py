@@ -381,6 +381,12 @@ class ResWorldHead(BaseModule):
                  # — ISSUE.md P0-1/P1-2). The field is still sampled so the
                  # [DIAG] line keeps reporting r_cmd during warmup.
                  risk_plan_warmup_epochs=2,
+                 # Linear ramp of the risk weights after warmup (epochs):
+                 # the hard 0->1 switch made loss_plan_reg jump 0.53->1.24
+                 # at the activation epoch (2026-08-13/14 log) — the ramp
+                 # spreads the planner-vs-risk trade-off over N epochs so
+                 # reg settles smoothly above init instead of spiking.
+                 risk_plan_ramp_epochs=2,
                  **kwargs):
         super(ResWorldHead, self).__init__()
         self.bev_h = bev_h
@@ -434,6 +440,7 @@ class ResWorldHead(BaseModule):
         self.loss_plan_info_weight = loss_plan_info_weight
         self.cvar_beta = cvar_beta
         self.risk_plan_warmup_epochs = risk_plan_warmup_epochs
+        self.risk_plan_ramp_epochs = risk_plan_ramp_epochs
         self._init_layers()
         self.loss_plan_reg = build_loss(loss_plan_reg)
         self.loss_plan_reg_init = build_loss(loss_plan_reg)
@@ -853,6 +860,16 @@ class ResWorldHead(BaseModule):
             # ISSUE.md P0-1/P1-2). The field is still sampled below so the
             # [DIAG] line keeps reporting r_cmd during warmup.
             risk_active = getattr(self, 'epoch', -1) >= self.risk_plan_warmup_epochs
+            # Linear ramp after warmup (0 -> 1 over risk_plan_ramp_epochs):
+            # avoids the hard-switch spike in loss_plan_reg observed at the
+            # activation epoch (0.53 -> 1.24 in the 2026-08-13 log).
+            risk_scale = 1.0
+            if risk_active and self.risk_plan_ramp_epochs > 0:
+                risk_scale = min(
+                    1.0,
+                    (getattr(self, 'epoch', self.risk_plan_warmup_epochs)
+                     - self.risk_plan_warmup_epochs + 1.0)
+                    / self.risk_plan_ramp_epochs)
             # absolute trajectory coords (per-step increments -> cumsum)
             traj_abs = ego_fut_preds.cumsum(dim=2)    # (B, M, T, 2)
             device = traj_abs.device
@@ -878,9 +895,10 @@ class ResWorldHead(BaseModule):
 
             if risk_active:
                 # minimax-style: mean commanded step risk over valid steps
+                # (risk_scale: linear ramp after warmup, see above)
                 loss_dict['loss_plan_risk'] = (
                     (r_cmd * fut_w).sum() / fut_w.sum().clamp(min=1.0)
-                    * self.loss_plan_risk_weight)
+                    * self.loss_plan_risk_weight * risk_scale)
 
                 # CVaR: tail of the commanded trajectory's step-risk values.
                 # P2-1 (fixed 2026-08): fut_w zeroes the INVALID steps
@@ -892,7 +910,7 @@ class ResWorldHead(BaseModule):
                     r_cmd_valid = r_cmd * fut_w       # (B, T) invalid -> 0
                     topk = r_cmd_valid.topk(k, dim=1).values.mean(dim=1)
                     loss_dict['loss_plan_cvar'] = (
-                        topk.mean() * self.loss_plan_cvar_weight)
+                        topk.mean() * self.loss_plan_cvar_weight * risk_scale)
 
                 # info gain: moving to reduce risk (start vs end of trajectory).
                 # P1-1 (fixed 2026-08): hinge form max(0, r_end - r_ego) —
@@ -921,7 +939,7 @@ class ResWorldHead(BaseModule):
                     r_end = re_cmd.gather(1, last_idx.unsqueeze(1)).squeeze(1)
                     info_penalty = (r_end - r_ego).clamp(min=0).mean()
                     loss_dict['loss_plan_info'] = (
-                        info_penalty * self.loss_plan_info_weight)
+                        info_penalty * self.loss_plan_info_weight * risk_scale)
 
         # ---- [DIAG] temporary risk-planning diagnostics (remove after tuning) ----
         # Caches a per-iter diagnostic line; DiagLoggerHook prints it at the

@@ -48,6 +48,8 @@ loss_plan_risk_weight = 0.1    # Minimax 语义（沿程 R_worst）——软正�
 loss_plan_cvar_weight = 0.1    # CVaR（沿程尾部，topk 前乘 fut_w，ISSUE P2-1）
 loss_plan_info_weight = 0.05   # 信息增益（hinge：末端风险高于起点才惩罚，ISSUE P1-1）
 cvar_beta = 0.25               # 风险尾部比例
+# risk_plan_warmup_epochs=2 + risk_plan_ramp_epochs=2（head 参数）：warmup 后
+# risk 权重线性 0→1 爬升，替代硬切换（硬切换曾使 loss_plan_reg 0.53→1.24 跳变）
 
 # ---- Stage 6 损失权重（0=关）----
 loss_div_weight = 0.1          # 假设多样性（余弦）
