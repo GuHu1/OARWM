@@ -24,7 +24,7 @@ Notes:
 
 Usage (from the repo root):
     python tools/analysis_tools/filter_occ_subset.py \
-        --result-pkl test/resworld_config/<ts>/pts_bbox/results_nusc.pkl \
+        --result-pkl test/oa_resworld_config/<ts>/pts_bbox/results_nusc.pkl \
         --out-json work_dirs/occ_subset_tokens.json
 """
 import argparse

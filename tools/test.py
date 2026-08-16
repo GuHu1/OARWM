@@ -256,8 +256,13 @@ def main():
             else:
                 mmcv.dump(outputs['bbox_results'], args.out)
         kwargs = {} if args.eval_options is None else args.eval_options
-        kwargs['jsonfile_prefix'] = osp.join('test', args.config.split(
-            '/')[-1].split('.')[-2], time.ctime().replace(' ', '_').replace(':', '_'))
+        # Output dir: test/<work_dir-basename>/<timestamp>/ — the main config
+        # work_dir is 'work_dirs/oa_resworld_config', so results land under
+        # test/oa_resworld_config/... (each ablation arm uses its own
+        # --work-dir and thus its own output subdir).
+        kwargs['jsonfile_prefix'] = osp.join(
+            'test', osp.basename(cfg.work_dir),
+            time.ctime().replace(' ', '_').replace(':', '_'))
         if args.format_only:
             dataset.format_results(outputs['bbox_results'], **kwargs)
 

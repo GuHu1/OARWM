@@ -16,7 +16,7 @@ convention as the drivable-dilation note in STATUS.md).
 
 Usage (from the repo root):
     python tools/analysis_tools/traj_behavior_stats.py \
-        --result-pkl test/resworld_config/<ts>/pts_bbox/results_nusc.pkl \
+        --result-pkl test/oa_resworld_config/<ts>/pts_bbox/results_nusc.pkl \
         [--token-json work_dirs/occ_subset_tokens.json]  # optional subset
 """
 import argparse

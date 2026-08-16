@@ -148,12 +148,12 @@ bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
 
 ### 3.3 可视化评估结果
 
-评估完成后（3.1 会输出 `test/resworld_config/<时间戳>/pts_bbox/results_nusc.pkl`），在**仓库根目录**执行：
+评估完成后（3.1 会输出 `test/oa_resworld_config/<时间戳>/pts_bbox/results_nusc.pkl`），在**仓库根目录**执行：
 
 ```bash
 # 生成 BEV 轨迹对比视频（vis.mp4，含 6 相机环视 + 预测/GT 轨迹）
 python tools/analysis_tools/visualization.py \
-    --result-path test/resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
+    --result-path test/oa_resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
     --save-path work_dirs/viz_oa
 ```
 
@@ -165,12 +165,12 @@ python tools/analysis_tools/visualization.py \
 ```bash
 # ① 遮挡子集筛选 + 子集 L2 重算（occ_frac > 20%，midas npz 为基准）
 python tools/analysis_tools/filter_occ_subset.py \
-    --result-pkl test/resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
+    --result-pkl test/oa_resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
     --out-json work_dirs/occ_subset_tokens.json
 
 # ② 近遮挡减速行为统计（掩码边界 5 m 内轨迹步的平均速度：预测 vs GT）
 python tools/analysis_tools/traj_behavior_stats.py \
-    --result-pkl test/resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
+    --result-pkl test/oa_resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
     [--token-json work_dirs/occ_subset_tokens.json]
 ```
 
