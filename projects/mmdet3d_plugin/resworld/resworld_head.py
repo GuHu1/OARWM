@@ -953,10 +953,21 @@ class ResWorldHead(BaseModule):
             rf_occ = ((risk_field * msk).sum()
                       / msk.float().sum().clamp(min=1.0)).item()
             rc = r_cmd.detach()                      # (B,T) commanded risk
+            # Trajectory-shape diagnostics (over-conservatism probe,
+            # 2026-08-16 eval: L2 ~0.57 avg & CR ~1e-4 -> suspected
+            # shrunken/slow trajectories; these two stats make the
+            # shrinkage visible in the training log):
+            #   traj_end = mean end displacement (m) of the commanded traj
+            #   traj_step = mean step size (m) of the commanded traj
+            tr = (traj_abs * cmd_w.unsqueeze(-1).unsqueeze(-1)).sum(dim=1)
+            tr = tr * fut_w.unsqueeze(-1)            # (B,T,2) valid steps
+            traj_end = tr[:, -1].norm(dim=-1).mean().item()
+            traj_step = (tr[:, 1:] - tr[:, :-1]).norm(dim=-1).mean().item()
             self._diag_msg = (
                 f"[DIAG] occ_frac={occ_frac:.3f} rf_mean={rf_mean:.5f} "
                 f"rf_occ={rf_occ:.5f} r_cmd_mean={rc.mean().item():.5f} "
-                f"r_cmd_pos_frac={(rc > 0).float().mean().item():.3f}")
+                f"r_cmd_pos_frac={(rc > 0).float().mean().item():.3f} "
+                f"traj_end={traj_end:.2f}m traj_step={traj_step:.2f}m")
 
         return loss_dict
 

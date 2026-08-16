@@ -247,10 +247,23 @@
 - [ ] `loss_plan_risk / loss_plan_cvar / loss_plan_info` vs `loss_plan_reg` 相对量级（P0-1）
 - [ ] **`loss_plan_reg` vs `loss_plan_reg_init`**（P0-1 权衡指标：risk 激活后 reg 略高于 init ~5% 属预期；ramp 后激活 epoch 不应再有 0.53→1.24 式跳变）
 - [ ] `grad_norm` 是否频繁触顶 35（P0-1/P0-5：爆炸时 1348→1e10，修复后应回落）
-- [ ] `loss_occ_halluc` 冷启动值是否远大于其他损失（P1-4）
-- [ ] `loss_plan_info` 是否 ≥ 0 且不持续发散（P1-1）
-- [ ] `loss_div` 是否维持非零（P0-2，detach 后假设不应坍缩）
-- [ ] 前 1-2 epoch 规划 loss 与基线量级一致（P1-2/P0-4 zero-init 生效）
+- [x] `loss_plan_info` ≥ 0 且不持续发散（P1-1：首轮训练全程 0.0577-0.2054 ✓）
+- [x] `loss_div` 维持非零（P0-2：首轮训练 0.0000-0.0036，假设未完全坍缩 ✓）
+- [x] `loss_occ_halluc` 冷启动不异常主导（P1-4：首轮 iter100 = 4.27 与 reg 3.18 同量级 ✓）
+- [x] 前 1-2 epoch 规划 loss 正常量级（P1-2/P0-4 zero-init 生效：reg 3.18→0.53 平滑下降 ✓）
+- [ ] **`traj_end` / `traj_step` 诊断**（2026-08-16 新增：首轮评估 L2 avg≈0.57、CR≈1e-4 呈"过度保守"画像，疑似轨迹缩水；对比 GT 巡航速度 ~2-5 m/step 判断是否系统性缩水）
 - [ ] 对照 `abl_baseline` 臂的 L2 曲线（全局基准；P0-4 残差式注入后主臂 L2 不应显著劣于基线）
 - [ ] `r_cmd_pos_frac` 显著上升、`loss_plan_risk/cvar/info` 有真实量级（P0-3 转置修复的服务器复验）
 - [ ] `occ_frac` 回落到合理水平（P1-3，待 `--use_drivable` 导出完成 + `use_osz_drivable=True`；旧日志爆炸后 occ_frac 一度达 0.9）
+
+## 首轮评估记录（2026-08-16，epoch_12_ema，12 epoch，f84169d 配置）
+
+- 开环规划：`plan_L2_1s/2s/3s = 0.285 / 0.543 / 0.896`（Avg ≈0.57，参考 AVG 0.30 / MAX 0.59）
+- 碰撞率：`plan_obj_col_1s/2s/3s ≈ 0 / 1e-4 / 1e-4`（参考 AVG 0.01/0.03/0.14）——**低于参考 3 个数量级**
+- 画像：L2 接近参考 MAX + CR 趋零 = **过度保守**（轨迹系统性偏离 GT）。训练日志 reg>init ~5% 的
+  risk 拉偏在此兑现；最大嫌疑放大源为 **P1-3 掩码过曝**（occ_frac 0.4-0.8，drivable 未启用）→
+  风险场弥漫 → 轨迹被压向少数低风险格。
+- 待办：① 跑 `abl_baseline` 同配置对照（判定"劣于基线"的唯一可靠方式）；② 收尾 P1-3
+  （drivable 导出完成 → `use_osz_drivable=True` + `loss_depth_weight` 回退 0.1）后重训；
+  ③ 若 baseline 对照确认 L2 劣化显著，risk 权重 0.1→0.03-0.05 或延长 ramp；④ 可视化
+  val 样本确认轨迹模式。
