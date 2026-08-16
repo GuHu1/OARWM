@@ -59,6 +59,33 @@ loss_occ_gt_weight = 1.0       # 检测框占用 BCE
 loss_occ_gt_pos_weight = 5.0   # BCE pos_weight（对抗平凡解）
 ```
 
+### 2.1.2 基线配置（纯 ResWorld，全部开关关闭）
+
+**跑基线训练只需把 `resworld_config.py` 开关区改成**（其余配置不动）：
+
+```python
+# ---- 基线：全部开关关闭 ----
+use_osz_midas = False
+use_osz_rcsample = False
+# use_osz 由上面两行自动派生为 False，无需手改
+use_oarwm = False            # 不创建 MHST（零额外参数）
+use_risk_field = False       # 不算风险场
+use_risk_plan = False        # 不算风险规划损失
+```
+
+然后照常训练（用独立 `--work-dir` 防快照覆盖）：
+
+```bash
+bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4 \
+    --work-dir work_dirs/abl_baseline
+```
+
+要点：
+- `use_oarwm=False` 时 `OcclusionMHSTHead`/`occ_head` **不创建**、`use_risk_field/plan=False` 时风险损失不算——模型严格等价纯 ResWorld（无额外参数、无额外计算）；
+- `use_osz=False` 派生 `use_next=False`——数据管线**不加载 next 帧**（零开销），且 `loss_occ_halluc/uncertainty` 因无 `gt_bev_next` 自动跳过；
+- Stage-6 的 `loss_occ_gt` 因无 `occ_head` 自动跳过，其余基线损失（depth/plan reg）照常；
+- 恢复主配置：把开关区改回 §2.1 的值即可。
+
 ### 2.2 训练命令
 
 ```bash
@@ -99,12 +126,38 @@ bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
 
 ### 3.2 指标与参考（UniAD/VAD 风格开环）
 
-| 指标 | L2 1s | L2 2s | L2 3s | L2 Avg | CR 1s | CR 2s | CR 3s | CR Avg |
-|---|---|---|---|---|---|---|---|---|
-| L2_MAX / CR_MAX | 0.19 | 0.50 | 1.08 | 0.59 | 0.02 | 0.06 | 0.43 | 0.17 |
-| L2_AVG / CR_AVG | 0.14 | 0.27 | 0.49 | 0.30 | 0.01 | 0.03 | 0.14 | 0.06 |
+**L2（ADE，当前采用的表格口径）：**
 
-### 3.3 数据说明
+| 配置 | L2 1s | L2 2s | L2 3s | L2 Avg |
+|---|---|---|---|---|
+| 官方参考 AVG | 0.14 | 0.27 | 0.49 | 0.30 |
+| **基线实测（纯 ResWorld，12 epoch，开关全关）** | 0.142 | 0.271 | 0.486 | **0.300** |
+| OARWM 首轮（2026-08-16，epoch_12_ema） | 0.285 | 0.543 | 0.896 | 0.574 |
+
+**L2_stp3（终点 FDE）：**
+
+| 配置 | stp3 1s | stp3 2s | stp3 3s | stp3 Avg |
+|---|---|---|---|---|
+| **基线实测（纯 ResWorld，12 epoch）** | 0.185 | 0.493 | 1.081 | **0.586** |
+| OARWM 首轮（2026-08-16） | 0.375 | 0.982 | 1.808 | 1.055 |
+
+碰撞率（CR）：OARWM 首轮 ≈ 0 / 1e-4 / 1e-4（1s/2s/3s，过度保守画像，见 ISSUE 首轮评估记录）；基线 CR 待补。
+
+### 3.3 可视化评估结果
+
+评估完成后（3.1 会输出 `test/resworld_config/<时间戳>/pts_bbox/results_nusc.pkl`），在**仓库根目录**执行：
+
+```bash
+# 生成 BEV 轨迹对比视频（vis.mp4，含 6 相机环视 + 预测/GT 轨迹）
+python tools/analysis_tools/visualization.py \
+    --result-path test/resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
+    --save-path work_dirs/viz_oa
+```
+
+- 脚本硬编码 `dataroot='./data/nuscenes'`，需在仓库根目录运行；
+- 输出 `work_dirs/viz_oa/vis.mp4`——直接目视预测轨迹 vs GT 轨迹的偏移/缩水模式。
+
+### 3.4 数据说明
 
 - `vad_nuscenes_infos_temporal_*.pkl` 用 VAD 生成文件（`tools/data_converter/vad_nuscenes_converter.py` 仅自行生成时用）；
 - `nuscenes_map_anns_val.json` 首次评估自动生成；
@@ -172,18 +225,7 @@ python OSZ/export_osz_dataset.py --dataroot data/nuscenes --version v1.0-trainva
 
 ---
 
-## 5. 下一步改造路线（按 Stage）
-
-1. **Stage 1-6 均已实现**（见 §1 总览）；后续为完善与扩展：
-   - **评估与调优**：完整训练 12 epoch，观察各损失收敛；对照官方参考指标（§3.2）；调损失权重（如 `loss_occ_halluc/uncertainty` 冷启动梯度大时可降权）；
-   - **消融矩阵**：按 §4.2 跑全消融臂，验证各 Stage 贡献；
-   - **Bench2Drive 闭环**：闭环驾驶得分（Merging / Emergency Brake / Give Way / Unprotected Turn）；
-   - **自建遮挡数据集**：筛选 parked car / truck / 交叉口遮挡比例 >20% 片段。
-2. **可选扩展**（见 §6 未实现项）：语义解码臂、时空演化 rollout、π 信念修正——如需纳入论文再实现。
-
----
-
-## 6. 设计但未实现（及原因）
+## 5. 设计但未实现（及原因）
 
 - **L_recon（可见区 BEV 重建）**：ResWorld 无未来 BEV 真值监督（BEV 特征是编码器输出而非标签），无逐帧重建目标；可见区监督由 latent 残差路径 + 规划损失承担。
 - **语义解码臂（附录 A 的 `RiskWeight` 类别加权）**：需语义监督（lidarseg 或检测框类别栅格化）；主方案保持语义不可知（无监督语义不可信），仅保留为可选臂设计。
@@ -193,7 +235,7 @@ python OSZ/export_osz_dataset.py --dataroot data/nuscenes --version v1.0-trainva
 
 ---
 
-## 7. 已知限制
+## 6. 已知限制
 
 - **深度范围**：MiDaS 输出逆深度经 LiDAR 对齐后为 metric 深度，但无 LiDAR 区域仅相对深度；
 - **OSZ 网格前方仅 ±15 m**（跟随 ResWorld `grid_config`）：>15 m 前方遮挡物不在世界模型 BEV 内；若需更远需同时改 `grid_config` 与 `OSZ/config.py`（单一来源同步）；
