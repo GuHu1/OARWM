@@ -365,6 +365,10 @@ class ResWorldHead(BaseModule):
                  loss_uncertainty_weight=1.0,
                  loss_occ_gt_weight=1.0,
                  loss_occ_gt_pos_weight=5.0,
+                 # risk-field grounding (design doc §6.2c): anchors the
+                 # raw risk intensity to the exposure error e2 (zero extra
+                 # data). 0 disables the term.
+                 loss_risk_ground_weight=0.1,
                  # Stage-5 risk-weighted planning (approach A: no candidate
                  # selection; the risk field regularises the trajectory).
                  use_risk_plan=False,
@@ -387,6 +391,12 @@ class ResWorldHead(BaseModule):
                  # spreads the planner-vs-risk trade-off over N epochs so
                  # reg settles smoothly above init instead of spiking.
                  risk_plan_ramp_epochs=2,
+                 # GT-risk upper-bound margin (design doc §5.1): the risk
+                 # terms are relative to the GT trajectory's along-path risk,
+                 # max(0, R(pred) - R(gt) - margin). 0 = pure upper bound;
+                 # 5.0 ≈ 1/3 of the normal rf_occ range (15-30) tolerates
+                 # risk-field noise around the GT path.
+                 risk_plan_margin=5.0,
                  **kwargs):
         super(ResWorldHead, self).__init__()
         self.bev_h = bev_h
@@ -433,6 +443,7 @@ class ResWorldHead(BaseModule):
         self.loss_uncertainty_weight = loss_uncertainty_weight
         self.loss_occ_gt_weight = loss_occ_gt_weight
         self.loss_occ_gt_pos_weight = loss_occ_gt_pos_weight
+        self.loss_risk_ground_weight = loss_risk_ground_weight
         # Stage-5 risk-weighted planning.
         self.use_risk_plan = use_risk_plan
         self.loss_plan_risk_weight = loss_plan_risk_weight
@@ -441,6 +452,7 @@ class ResWorldHead(BaseModule):
         self.cvar_beta = cvar_beta
         self.risk_plan_warmup_epochs = risk_plan_warmup_epochs
         self.risk_plan_ramp_epochs = risk_plan_ramp_epochs
+        self.risk_plan_margin = risk_plan_margin
         self._init_layers()
         self.loss_plan_reg = build_loss(loss_plan_reg)
         self.loss_plan_reg_init = build_loss(loss_plan_reg)
@@ -638,14 +650,19 @@ class ResWorldHead(BaseModule):
             #    feature is 100x100, so the mask is downsampled (nearest).
             pb = pred_bev.permute(0, 2, 1).reshape(bs, c, h, w)
             mhst_mask = _align_osz_mask(osz_mask, (h, w), device, pb.dtype)
-            fused, mhst_aux = self.mhst(pb, mhst_mask)
+            # (design doc §3.3): col_attn keeps the CLEAN pred_bev — the
+            # multi-hypothesis mixture no longer perturbs the shared BEV
+            # features consumed by trajectory refinement. The hypotheses
+            # reach the planner ONLY via the explicit risk field (Stage 4),
+            # so the fused output is computed for its aux (pi/sigma/delta)
+            # and then intentionally dropped here.
+            mhst_aux = self.mhst(pb, mhst_mask)[1]
             # Extra aux for the Stage-6 losses: un-fused 4D pred_bev, the
             # occlusion occupancy prediction and the aligned osz_eye mask.
             mhst_aux['pred_bev_4d'] = pb
             mhst_aux['mask'] = mhst_mask[:, :1]
             if hasattr(self, 'occ_head'):
                 mhst_aux['s_occ'] = self.occ_head(pb)
-            pred_bev = fused.reshape(bs, c, h * w).permute(0, 2, 1)
         elif self.use_oarwm:
             # Fail loudly: MHST without a mask source would silently produce
             # an identity (and leave all its params unused under DDP). The
@@ -828,6 +845,21 @@ class ResWorldHead(BaseModule):
                         ((sigma - e2).abs() * occ_mask.float()).sum() / n_occ
                         * self.loss_uncertainty_weight)
 
+                # 6.2c L_risk_ground (design doc §4/§6.2): anchor the
+                # RAW risk intensity (sigma-weighted hypothesis magnitude,
+                # NOT detached — grounding belongs to the distribution-
+                # shaping losses, the P0-2 detach contract only guards the
+                # risk-field -> planner direction) to the real exposure
+                # change e2. The risk field thus becomes an unbiased
+                # "future content change" estimate: low along the GT path,
+                # so the GT-risk upper bound (§5.1) stays dormant there.
+                if self.loss_risk_ground_weight > 0:
+                    r_raw = (sigma / (1.0 + sigma)) * delta.norm(
+                        dim=2).mean(dim=1, keepdim=True) * mask  # (B,1,H,W)
+                    loss_dict['loss_risk_ground'] = (
+                        ((r_raw - e2).pow(2) * mask).sum() / n_occ
+                        * self.loss_risk_ground_weight)
+
             # 6.2b L_occ_gt: BCE of the occupancy head against rasterised
             # detection-box BEV occupancy (occluded cells only).
             if self.loss_occ_gt_weight > 0 and hasattr(self, 'occ_head') \
@@ -852,7 +884,7 @@ class ResWorldHead(BaseModule):
         # regularises the predicted trajectory so the network learns to avoid
         # high-risk (ghost-probe) regions end-to-end. R_worst is the over-K
         # max (minimax semantics); the step-risk tail gives CVaR; the
-        # start-vs-end risk drop rewards active sensing (info gain).
+        # end-risk vs GT-end risk drop rewards active sensing (info gain).
         risk_field = preds_dicts.get('risk_field')   # (B, 2, H, W)
         if self.use_risk_plan and risk_field is not None:
             # Risk terms are disabled for the first risk_plan_warmup_epochs
@@ -879,65 +911,72 @@ class ResWorldHead(BaseModule):
             nx = (traj_abs[..., 0] - gmin[0]) / (gsz[0] * 200)   # 0-1
             ny = (traj_abs[..., 1] - gmin[1]) / (gsz[1] * 200)
             grid = torch.stack([nx * 2 - 1, ny * 2 - 1], dim=-1)  # (B,M,T,2)
+            # GT trajectory risk (design doc §5): ego_fut_gt is per-step
+            # INCREMENTS (it is matched against the incremental predictions
+            # by the L1 above and cumsum'ed in the test-time metric), so
+            # cumsum it to absolute coords first — its along-path risk is
+            # the "acceptable safety" upper bound.
+            traj_abs_gt = ego_fut_gt.cumsum(dim=2)      # (B, M, T, 2) absolute
+            nx_gt = (traj_abs_gt[..., 0] - gmin[0]) / (gsz[0] * 200)
+            ny_gt = (traj_abs_gt[..., 1] - gmin[1]) / (gsz[1] * 200)
+            grid_gt = torch.stack(
+                [nx_gt * 2 - 1, ny_gt * 2 - 1], dim=-1)          # (B,M,T,2)
             B, M, T, _ = grid.shape
-            # Sample both risk fields in one call (channel 0 = R_exp for
-            # CVaR / info gain, 1 = R_worst for minimax).
+            # Sample both risk fields for pred and GT in one call each
+            # (channel 0 = R_exp, 1 = R_worst).
             sampled = F.grid_sample(
                 risk_field, grid.reshape(B, M * T, 1, 2),
                 mode='bilinear', align_corners=True).reshape(B, M * T, 2)
+            sampled_gt = F.grid_sample(
+                risk_field, grid_gt.reshape(B, M * T, 1, 2),
+                mode='bilinear', align_corners=True).reshape(B, M * T, 2)
             r_worst = sampled[..., 1].reshape(B, M, T)
             r_exp = sampled[..., 0].reshape(B, M, T)
+            r_worst_gt = sampled_gt[..., 1].reshape(B, M, T)
+            r_exp_gt = sampled_gt[..., 0].reshape(B, M, T)
             # command-weighted: only the commanded trajectory is supervised
             cmd_w = ego_fut_cmd  # (B, M) one-hot (squeezed above)
             fut_w = ego_fut_masks.float()             # (B, T) valid flags
             r_cmd = (r_worst * cmd_w.unsqueeze(-1)).sum(dim=1)   # (B, T)
             re_cmd = (r_exp * cmd_w.unsqueeze(-1)).sum(dim=1)    # (B, T)
+            r_gt_cmd = (r_worst_gt * cmd_w.unsqueeze(-1)).sum(dim=1)  # (B,T)
+            re_gt_cmd = (r_exp_gt * cmd_w.unsqueeze(-1)).sum(dim=1)   # (B,T)
+            margin = self.risk_plan_margin
 
             if risk_active:
-                # minimax-style: mean commanded step risk over valid steps
-                # (risk_scale: linear ramp after warmup, see above)
+                # relative form (design doc §5.1): GT risk is the
+                # acceptable-safety upper bound; only steps RISKIER than the
+                # human demo are penalised — when pred ~= GT the term is 0
+                # (zero gradient) and the open-loop L2 regression trains
+                # undisturbed. (risk_scale: linear ramp after warmup.)
                 loss_dict['loss_plan_risk'] = (
-                    (r_cmd * fut_w).sum() / fut_w.sum().clamp(min=1.0)
+                    ((r_cmd - r_gt_cmd - margin).clamp(min=0) * fut_w).sum()
+                    / fut_w.sum().clamp(min=1.0)
                     * self.loss_plan_risk_weight * risk_scale)
 
-                # CVaR: tail of the commanded trajectory's step-risk values.
-                # P2-1 (fixed 2026-08): fut_w zeroes the INVALID steps
-                # BEFORE topk — previously invalid padded steps (whose
-                # risk can be arbitrary, e.g. trajectory extrapolation far
-                # from the BEV) could dominate the tail.
+                # CVaR: tail of the commanded trajectory's step-risk values,
+                # relative to the GT tail. P2-1 (fixed 2026-08): fut_w zeroes
+                # the INVALID steps BEFORE topk.
                 if self.loss_plan_cvar_weight > 0:
                     k = max(1, int(math.ceil(T * self.cvar_beta)))
                     r_cmd_valid = r_cmd * fut_w       # (B, T) invalid -> 0
-                    topk = r_cmd_valid.topk(k, dim=1).values.mean(dim=1)
+                    r_gt_valid = r_gt_cmd * fut_w     # (B, T) invalid -> 0
+                    topk_pred = r_cmd_valid.topk(k, dim=1).values.mean(dim=1)
+                    topk_gt = r_gt_valid.topk(k, dim=1).values.mean(dim=1)
                     loss_dict['loss_plan_cvar'] = (
-                        topk.mean() * self.loss_plan_cvar_weight * risk_scale)
+                        (topk_pred - topk_gt - margin).clamp(min=0).mean()
+                        * self.loss_plan_cvar_weight * risk_scale)
 
-                # info gain: moving to reduce risk (start vs end of trajectory).
-                # P1-1 (fixed 2026-08): hinge form max(0, r_end - r_ego) —
-                # only an END risk ABOVE the ego start risk is penalised,
-                # so the term has a lower bound (0) and no longer pushes the
-                # trajectory away from GT without limit; the end is the LAST
-                # VALID step (fut_w), not the padded one.
+                # info gain (relative form): the ego-origin risk is
+                # IDENTICAL for both trajectories, so the relative bound
+                # reduces to the end-risk difference. The end is the LAST
+                # VALID step (fut_w), not the padded one (ISSUE P1-1).
                 if self.loss_plan_info_weight > 0:
-                    # Sample R_exp at the ego cell (grid origin). The ego grid
-                    # is expanded to batch size B — grid_sample requires input
-                    # and grid to share the batch dim (B>1 training batches).
-                    # Sample the raw risk_field (B,2,H,W), NOT r_exp — that is
-                    # already the per-step sampled values (B, M, T) and would
-                    # break grid_sample's 4D input contract.
-                    # align_corners=True matches the col_attn pixel-centre
-                    # convention (ISSUE.md P2-2).
-                    egx = (0.0 - gmin[0]) / (gsz[0] * 200) * 2 - 1
-                    egy = (0.0 - gmin[1]) / (gsz[1] * 200) * 2 - 1
-                    ego_grid = torch.tensor(
-                        [[egx, egy]], dtype=torch.float32,
-                        device=device).view(1, 1, 1, 2).expand(B, 1, 1, 2)
-                    r_ego = F.grid_sample(
-                        risk_field[:, 0:1], ego_grid, mode='bilinear',
-                        align_corners=True).reshape(B)   # (B,) R_exp at ego
                     last_idx = (fut_w.sum(dim=1).long() - 1).clamp(min=0)
                     r_end = re_cmd.gather(1, last_idx.unsqueeze(1)).squeeze(1)
-                    info_penalty = (r_end - r_ego).clamp(min=0).mean()
+                    r_end_gt = re_gt_cmd.gather(
+                        1, last_idx.unsqueeze(1)).squeeze(1)
+                    info_penalty = (r_end - r_end_gt).clamp(min=0).mean()
                     loss_dict['loss_plan_info'] = (
                         info_penalty * self.loss_plan_info_weight * risk_scale)
 

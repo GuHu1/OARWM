@@ -27,7 +27,7 @@ ResWorld 提出了一种轻量的时序残差世界模型（Temporal Residual Wo
 
 > **在轻量 BEV 残差世界模型中显式分离可见区与遮挡区的动力学，将遮挡区从"确定性残差的受害者"转化为"受几何约束的多假设概率空间"，并让多假设分布以显式形式贯穿感知→表示→风险→决策全链路，最终构建主动感知的安全规划器。**
 
-与基线的本质区别：ResWorld 是"一条确定性的特征预测链"，OARWM-Res 是**四条显式层叠的遮挡感知链**——几何层回答"哪里不可信"，分布层回答"可能是什么"，风险层回答"危险在哪里"，决策层回答"怎么走才保守且高效"；每一层的输出都是下一层的显式输入，多假设信息在链路上逐级传导、不被中间环节坍缩（路径 A：特征输出保持期望混合，分布经旁路 aux 传导至风险与决策，见 Stage 3"多假设价值链条"）。
+与基线的本质区别：ResWorld 是"一条确定性的特征预测链"，OARWM-Res 是**四条显式层叠的遮挡感知链**——几何层回答"哪里不可信"，分布层回答"可能是什么"，风险层回答"危险在哪里"，决策层回答"怎么走才保守且高效"；每一层的输出都是下一层的显式输入，多假设信息在链路上逐级传导、不被中间环节坍缩（分布经 aux 旁路传导至风险与决策层，且不回流共享 BEV 特征，见 Stage 3）。
 
 ---
 
@@ -43,35 +43,40 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
 │     │     └─► BEV 特征 B_t ∈ R^(H×W×C)
 │     └─► Stage 2: 显式遮挡几何注入 (新增 ★)
 │           ├─► OSZ 高度感知射线投射 → 遮挡掩码 M_t^occ ∈ {0,1}^(H×W) (osz_eye)
-│           └─► 遮挡感知 BEV 特征 B̃_t = B_t + E_occ ⊙ M_t^occ（残差式，zero-init 起步等价基线，见 ISSUE P0-4）
+│           └─► 遮挡感知 BEV 特征 B̃_t = B_t + E_occ ⊙ M_t^occ（残差式，zero-init 起步等价基线）
 │           ⬇ 传递: M_t^occ（逐层复用，4D 契约 (B,3,H,W)）
 │
 ├─► 分布层 (Stage 3): "可能是什么"
 │     ├─► 可见区: 确定性残差预测 (继承 ResWorld)
 │     └─► 遮挡区: 多假设随机残差转移 MHST (新增 ★)
 │           ├─► K 假设残差 ΔB^(k) + 先验 π + 不确定度 σ   （旁路 aux）
-│           └─► 融合未来 BEV 特征 B̂_{t+1} = Σ_k π_k (B̃_t + ΔB^(k))   （期望输出, 路径 A）
+│           └─► 多假设不回流 BEV 特征（col_attn 消费干净 pred_bev），仅经风险场进入决策
 │           ⬇ 传递: (π, σ, ΔB^(k)) 经 outs['mhst'] 旁路传导（不在表示层坍缩）
 │
 ├─► 风险层 (Stage 4): "危险在哪里"
 │     ├─► 多假设风险分解 R^(k) = w_σ·σ·‖ΔB^(k)‖·1[M]（语义不可知代理）
 │     ├─► 双输出: 期望风险 R_exp = Σ_k π_k R^(k) 与 最坏风险 R_worst = max_k R^(k)
 │     └─► 不确定性+占用驱动遮挡放大 R̃ = R·(1+β·U·M)·(1+γ·s_occ·M), U = H(π)/logK
+│     └─► 真实性锚定: 原始强度 σ/(1+σ)·‖ΔB‖ 与暴露误差 e² 对齐（L_risk_ground）
 │           ⬇ 传递: (R_exp, R_worst) 至决策层（最坏假设保留, 对齐 Minimax）
 │
 ├─► 决策层 (Stage 5): "怎么走"
 │     ├─► BEV Planner (继承 ResWorld, 单轨迹回归)
 │     ├─► 风险加权轨迹损失 L_plan_risk（沿程 R_worst, Minimax 语义）(新增)
 │     ├─► 沿程风险尾部 L_plan_cvar（CVaR 语义）(新增)
-│     └─► 信息增益奖励 L_plan_info = max(0, R_exp(τ_end) − R_exp(ego))（hinge，主动感知）(新增)
+│     └─► 信息增益奖励 L_plan_info = max(0, R_exp(τ_end) − R_exp(τ_end_gt))（末端风险差, 相对上界）(新增)
 │     └─► 预测轨迹 τ（风险规避, 非候选筛选）
+│
+│   核心：risk/cvar 为 GT 风险上界相对形式 max(0, R(τ_pred) − R(τ_gt) − μ)、
+│   info 为末端风险差 max(0, R(τ_end_pred) − R(τ_end_gt))（无 μ）——
+│   τ_pred ≈ τ_gt 时零梯度，不伤开环 L2；只在"偏离 GT 且更危险"时介入。
 │
 └─► 自监督闭环 (Stage 6): 端到端训练
       ├─► 遮挡区自监督想象损失 L_occ_halluc（静态，§6.2）+ 动态占用监督 L_occ_gt（§6.2b）
+      ├─► 风险场真实性锚定 L_risk_ground（§6.2c，零额外数据）
       ├─► 多假设多样性损失 L_div（对抗 L_occ_halluc 静态偏置）
       ├─► 不确定性校准损失 L_uncertainty（σ 校准, 训练契约）
-      ├─► 规划损失 L_plan = L_plan_reg + 风险加权项（含 L_info）
-      └─► 信息增益损失 L_info = max(0, R_exp(τ_end) − R_exp(ego))（hinge）
+      └─► 规划损失 L_plan = L_plan_reg + 相对风险项（含 L_info）
 ```
 
 ---
@@ -79,7 +84,7 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
 **总体设计原则**（贯穿全链路的三个约束）：
 
 1. **几何显式性**：遮挡掩码由 Stage 2 的几何射线投射显式生成（非数据驱动隐式学习），全链路复用同一份 `M_t^occ`——"哪里不可信"由几何决定，可解释、可审计。
-2. **不确定性显式性**：多假设分布 (π, σ, ΔB) 以显式形式（`outs['mhst']`）沿链路旁路传导，**不得在中间环节坍缩为单点估计**——特征输出可以是期望（路径 A，兼容基线接口），但分布必须完整到达风险层与决策层。
+2. **不确定性显式性**：多假设分布 (π, σ, ΔB) 以显式形式（`outs['mhst']`）沿链路旁路传导，**不得在中间环节坍缩为单点估计**——分布**不回流共享 BEV 特征**（`col_attn` 消费干净 `pred_bev`，几何精修不受多假设扰动），而必须完整到达风险层与决策层（以显式风险场的形式）。
 3. **保守性可解释性**：遮挡区的风险放大由**不确定性驱动**（π 熵 U 而非常数），最坏假设 (`R_worst`) 显式保留至决策层（Minimax）——保守行为可归因于"哪里不确定、有多不确定"。
 
 ---
@@ -135,7 +140,7 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
    $$\tilde{B}_t = B_t + E_{occ} \odot M_t^{occ}$$
    其中 $E_{occ} \in \mathbb{R}^{C}$ 为可学习的遮挡类型偏移（由掩码通道 `(osz_eye, osz_ground, semi)` 经 1×1 Conv 生成，区分严格盲区 / 半透明盲区 / 动态变化遮挡），通过广播与 BEV 特征逐元素相乘。
    
-   **残差式 + zero-init（2026-08 修订，ISSUE P0-4）**：注入由初稿的替换式 $B_t \odot (1-M) + E_{occ} \odot M$ 改为**残差式** $B_t + E_{occ} \odot M$，且 `osz_embed` 卷积 zero-init——训练第 0 步 $\tilde{B}_t = B_t$ 与基线严格一致，遮挡区原始特征的空间信息保留，$E_{occ}$ 只学习"遮挡偏移"。原因：替换式下 1×1 Conv 生成的嵌入无空间上下文，掩码过曝时（occ_frac≈45%）近半 BEV 特征被同质随机向量替换，col_attn 采样到无差别噪声，必然劣于基线。
+   **残差式注入（zero-init）**：遮挡感知特征为残差形式 $B_t + E_{occ} \odot M_t^{occ}$——遮挡区原始特征的空间信息完整保留，$E_{occ}$ 仅学习"遮挡偏移"（替换式会以位置无关的嵌入抹除遮挡区特征，破坏下游采样）；偏移头 zero-init 使训练初始严格等价基线（遮挡区零扰动），随训练渐进学习。
 
 **输出**: OSZ 模块输出 `bev_height`、`osz_ground`、`osz_eye`、`semi`、`drivable_mask`（200×200，与 ResWorld 网格同格）；OARWM 模型端输出遮挡感知 BEV 特征 $\tilde{B}_t$（`OcclusionAwareFusion`）。
 
@@ -143,7 +148,7 @@ OARWM-Res 包含六大阶段。与前版"六阶段并列"不同，本文档将�
 
 - **OSZ 深度估计**：**MiDaS v2.1 Small**
 
-- **OSZ 掩码接入**：OSZ 流水线输出 `bev_height / osz_ground / osz_eye / drivable_mask`（网格与 ResWorld `grid_config` 对齐，200×200 各向异性），每帧导出 npz 供 ResWorld 数据管线加载（见 STATUS.md）。
+- **OSZ 掩码接入（双源）**：上述几何流程（深度 → 反投影 → 射线投射）对两种掩码源相同——**离线**：MiDaS 深度导出 `{token}.npz`（`bev_height / osz_ground / osz_eye / semi / drivable_mask`，200×200），由数据管线按 token 加载；**在线**：模型自身 RCSample 深度头实时生成掩码（`build_osz_mask_online`，与主训练同源，无需导出）。两源输出通道序（`osz_eye, osz_ground, semi`）与网格约定完全一致。
 
 **作用**: 将 OSZ 生成的显式几何先验注入 BEV 特征空间，使世界模型明确知道"哪些位置的信息不可信/需要想象"。
 
@@ -160,7 +165,7 @@ ResWorld 的残差世界模型通过时序 BEV 特征预测未来残差：
 $$\hat{B}_{t+1} = B_t + \Delta B_{t+1}, \quad \Delta B_{t+1} = f_{RWM}(\{B_{t-2}^{\text{align}}, B_{t-1}^{\text{align}}, B_t\})$$
 我们将其扩展为**遮挡感知多假设残差世界模型（OA-RWM）**。
 
-**与 Basework 实现的对接（实现载体）**: ResWorld 的残差并非逐 BEV 位置预测——`resworld_head.py` 先将 BEV 特征经 TokenLearner 压缩为 latent tokens，在 **latent 空间**做相邻帧差分（`res_latent_query = bev_embed[:-1] - bev_embed[1:]`），经 latent decoder 后由 tokenfuser 融合回 BEV（`pred_bev = tokenfuser(...) + bev_navi_embed`，残差连接）。因此 MHST 的**实现载体**为：在 `pred_bev` 输出后、`col_attn` 之前按掩码加门控多假设残差头（`OcclusionMHSTHead`）——`col_attn` 以初始轨迹为 reference 在 `pred_bev` 上采样，必须消费多假设融合后的结果。可见/遮挡路由以 Stage 2 的掩码为准；3.1-3.3 的逐位置公式为概念定义，实现按门控残差头对接。
+**与 Basework 实现的对接（实现载体）**: ResWorld 的残差并非逐 BEV 位置预测——`resworld_head.py` 先将 BEV 特征经 TokenLearner 压缩为 latent tokens，在 **latent 空间**做相邻帧差分（`res_latent_query = bev_embed[:-1] - bev_embed[1:]`），经 latent decoder 后由 tokenfuser 融合回 BEV（`pred_bev = tokenfuser(...) + bev_navi_embed`，残差连接）。因此 MHST 的**实现载体**为：在 `pred_bev` 输出后、`col_attn` 之前按掩码加门控多假设残差头（`OcclusionMHSTHead`）。**消费路径**：`col_attn` 以初始轨迹为 reference 在**干净的 `pred_bev`** 上采样——MHST 的融合输出有意不进共享 BEV 特征（几何精修不被多假设扰动），多假设分布 (π, σ, ΔB) 经 aux 旁路只以**显式风险场**的形式到达决策层（§4 风险场）。可见/遮挡路由以 Stage 2 的掩码为准；3.1-3.3 的逐位置公式为概念定义，实现按门控残差头对接。
 
 #### 3.1 BEV 位置分类与路由
 
@@ -196,7 +201,7 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 4. **混合分布输出**: 下一时刻遮挡位置的分布为：
    $$p(B_{t+1}(x,y) | B_t, a_t) = \sum_{k=1}^K \pi_t^{(x,y),k} \cdot \mathcal{N}(B_t(x,y) + \Delta B_{t+1}^{(k)}(x,y), \Sigma_k^2)$$
    其中 $\pi_t^{(x,y),k} = P(c_t^{(x,y)} = k | \cdot)$，且协方差 $\Sigma_k$ 在遮挡区内部**强制大于阈值** $\Sigma_{\min}$（不确定性下限）。
-   **实现**：σ 为每格标量 `softplus(s) + Σ_min`（`sigma_net`，Σ_min 默认 0.1 可配置；不预测 C×C 协方差防维度爆炸）；**门控合成**：可见区 `pred_bev` 原值、遮挡区 `Σ_k π_k·(pred_bev + ΔB^(k))`——推理侧消费融合后的单张 `pred_bev`（与基线下游接口一致），混合分布仅训练侧损失用（§6.2）。
+   **实现**：σ 为每格标量 `softplus(s) + Σ_min`（`sigma_net`，Σ_min 默认 0.1 可配置；不预测 C×C 协方差防维度爆炸）；**消费路径**：混合分布**不回流到 BEV 特征**——`col_attn` 消费干净的 `pred_bev`，分布 (π, σ, ΔB) 经 aux 旁路构成显式风险场（Stage 4）后进入决策；混合分布本身仅训练侧损失用（§6.2/6.2c）。
 
 **作用**: 将遮挡区从"信息缺失的空白"转化为"受几何约束的多假设想象空间"。
 
@@ -205,16 +210,6 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 - 混合隐变量 $c_t^{(x,y)}$ 提供了可解释性：我们可以检查模型认为"卡车后方最可能出现什么"。
 - 不确定性下限 $\Sigma_{\min}$ 是安全关键设计：即使模型"猜测"遮挡区为空，也保留最低限度的方差，防止过度自信。
 
-#### 3.4 遮挡-可见边界交互 (新增)
-
-当自车执行动作 $a_t$（如减速、变道）后，遮挡掩码 $M_{t+1}^{occ}$ 会动态变化。原本被遮挡的位置可能变为可见。
-
-**处理**:
-- 对从 $\mathcal{O}_t$ 转移到 $\mathcal{V}_{t+1}$ 的位置，用实际观测 $B_{t+1}^{\text{obs}}(x,y)$ 修正假设权重：
-  $$\pi_{t+1}^{(x,y),k} \propto \pi_t^{(x,y),k} \cdot \exp\left(-\|B_{t+1}^{\text{obs}}(x,y) - (B_t(x,y) + \Delta B_{t+1}^{(k)}(x,y))\|^2\right)$$
-- 若所有假设与观测偏差均较大，触发**异常检测**：可能为训练分布外的危险事件（如违规闯红灯车辆）。
-
-**作用**: 实现"预测-验证-修正"的认知闭环，模拟人类探头确认后更新信念的过程。
 
 ---
 
@@ -226,11 +221,11 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 
 1. **多假设风险分解（语义不可知代理）**: 对每个假设 $k$，在遮挡区内生成风险图：
    $$R^{(k)}(x,y) = w_\sigma \cdot \sigma(x,y) \cdot \big\| \Delta B^{(k)}(x,y) \big\|_2 \cdot \mathbb{1}[\,M_t^{occ}(x,y)\,]$$
-   其中 $\|\Delta B^{(k)}\|_2$ 是该假设预测的**内容变化强度**（feature-space 碰撞威胁代理），$\sigma$ 为不确定性加权，$w_\sigma$ 为尺度超参。**不依赖语义解码**——理由见"为何如此设计"1；语义解码器为**可选消融臂**（见下），`RiskWeight(c)` 类别加权公式移入附录 A。
+   其中 $\|\Delta B^{(k)}\|_2$ 是该假设预测的**内容变化强度**（feature-space 碰撞威胁代理），$\sigma$ 为不确定性加权，$w_\sigma$ 为尺度超参（σ 经有界变换 $\sigma/(1+\sigma)$ 进入实现，见梯度契约）。**不依赖语义解码**——理由见"为何如此设计"1；语义解码器为**可选消融臂**（见实验 §5.2 消融 9）。
    
-   **梯度契约（2026-08 修订，ISSUE P0-2/P2-3）**：风险场是分布的**无梯度测量**——实现中 $\pi, \sigma, \Delta B^{(k)}, s_{occ}$ 在进入风险场前全部 detach。分布只由 Stage 6 自己的损失（似然/校准/多样性/占用）塑造；规划器经 `grid_sample` 的采样坐标支路获得风险场空间梯度，学习**避开**风险而非**篡改**风险（否则"把 ΔB 学小 → risk→0"的作弊解会同时摧毁 MHST 表达力与 Stage 5）。σ 的绝对量级已由 $L_{uncertainty}$ 校准到特征误差量级，故实现用有界变换 $\sigma/(1+\sigma)$ 消费其相对量级（ISSUE P0-1）。
+   **梯度契约**：风险场是分布的**无梯度测量**——$\pi, \sigma, \Delta B^{(k)}, s_{occ}$ 在进入风险场前全部 detach：分布只由 Stage 6 的分布塑造损失（似然/校准/多样性/占用/锚定）训练，规划器经 `grid_sample` 的采样坐标支路获得风险场空间梯度，学习**避开**风险而非**篡改**风险（否则"把 ΔB 学小 → risk→0"的作弊解会同时摧毁 MHST 表达力与 Stage 5）。σ 被校准到特征误差量级，风险场以有界变换 $\sigma/(1+\sigma)$ 消费其相对量级。
 
-   **硬限幅（2026-08 修订，ISSUE P0-5/P0-6）**：后验权重趋零的"僵尸假设"失去似然监督、ΔB 模长自由漂移，`R_worst = max_k` 将其纳入 → 风险场无界 → 规划项梯度（∝ 风险场值）级联爆炸（2026-08-13 训练实录）。实现中三处硬限幅（正常区零影响、极端区饱和）：每个假设 ΔB 元素级 clamp（±10）、σ 上界（10，含 e² 校准目标）、风险场输出 clamp（100）。Minimax 语义保留（仍是 over-K max），仅 ΔB 表达限幅——特征残差有物理量级，限幅合理。
+   **表达有界性**：假设残差与不确定度为有界量（正常区零影响、极端区饱和）——ΔB 元素级限幅（±10）、σ 上界（10）、风险场输出限幅（100）。由此保证：似然对 ΔB 的约束强度不随 σ 增大而失效；风险场与规划梯度有界；Minimax 语义保留（仍是 over-K max），仅限制假设的表达幅度——特征残差有物理量级，限幅合理。
 
 2. **双输出保留多假设（对齐 Stage 5）**:
    $$R_{\text{exp}}(x,y) = \sum_{k=1}^K \pi_k(x,y)\, R^{(k)}(x,y), \qquad R_{\text{worst}}(x,y) = \max_{k} R^{(k)}(x,y)$$
@@ -240,7 +235,7 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
    $$\tilde{R}(x,y) = R(x,y) \cdot \big(1 + \beta \cdot U(x,y) \cdot M_t^{occ}(x,y)\big) \cdot \big(1 + \gamma \cdot s_{\text{occ}}(x,y) \cdot M_t^{occ}(x,y)\big), \quad U(x,y) = \frac{H(\pi(x,y))}{\log K} \in [0,1]$$
    其中 $H(\pi) = -\sum_k \pi_k \log \pi_k$ 为假设分布熵，$\beta$ 为不确定性放大上限，$s_{\text{occ}}$ 为遮挡区占用概率（6.2b 的占用头输出，$[0,1]$），$\gamma$ 为占用放大权重。语义：**遮挡 + 高不确定（π 均匀）→ 强放大（可能鬼探头）；遮挡 + 低不确定（信念单点，如"墙后确定是墙"）→ 不放大**；**占用高（检测框 GT 指示有动态物）→ 额外放大**——把"变化强度"过滤成"有威胁的变化"，替代初稿对所有遮挡格一视同仁的常数 α。
 
-4. **时空演化接口（先单帧，接口为时变）**: 沿自车运动/预测轨迹重采样得 $R_{t+\tau}$；遮挡暴露后按 Stage 3.4 更新 π（信念修正）→ 风险回落 $\Delta R = R_t - R_{t+\tau}$。时变重采样与 π 更新为后续接口（与 Stage 5 信息增益奖励联动，见 5.3）。
+4. **时空演化接口（先单帧，接口为时变）**: 沿自车运动/预测轨迹重采样得 $R_{t+\tau}$；遮挡暴露后按暴露观测更新 π（信念修正）→ 风险回落 $\Delta R = R_t - R_{t+\tau}$。时变重采样与 π 更新为后续接口（与 Stage 5 信息增益奖励联动，见 5.3）。
 
 **输出**: 概率化风险场 $\tilde{R}_{\text{exp}},\ \tilde{R}_{\text{worst}} \in \mathbb{R}^{B \times H \times W}$（存 `outs['risk_field']`，供 Stage 5 消费）。
 
@@ -258,44 +253,46 @@ $$\Delta B_{t+1}(x,y) = f_{\text{det}}(\{B_{t-2}^{\text{align}}(x,y), B_{t-1}^{\
 
 ResWorld 的 BEV Planner 直接优化轨迹的 L2 偏差。我们将其升级为**遮挡感知风险加权规划**——不做显式候选轨迹筛选（ResWorld 是单轨迹回归），而是让 Stage 4 的**保守风险场直接正则化预测轨迹**，端到端学习规避鬼探头高风险区。
 
-#### 5.1 风险加权轨迹损失（Minimax 语义）
+**核心设计——GT 风险上界约束**：GT 轨迹本身是人类安全驾驶示范，其沿程风险是"可接受安全水平"的上界。因此风险损失全部采用**相对形式**：只惩罚"预测轨迹比 GT 更危险"的偏离——`risk`/`cvar` 两项带容差超参 $\mu$（容忍风险场噪声），`info` 项为纯末端风险差（起点风险对两轨迹相同，无需 $\mu$）。当预测轨迹与 GT 一致时全部为零（零梯度）——开环 L2 回归独占训练、不劣于基线；仅当模型偏离 GT 且更危险（真正进入鬼探头高风险区）时才被拉回 GT 的安全水平。"保守性"由此定义为**不劣于人类示范的安全性**，而非全局最小化风险。
 
-预测轨迹（`ego_fut_preds`，增量 cumsum 还原绝对坐标）沿程采样**最坏风险场** $R_{\text{worst}}$（Stage 4 第 2 步，over-K 的 max，即 minimax 语义）：
+#### 5.1 风险加权轨迹损失（Minimax 语义，相对 GT 上界）
 
-$$L_{\text{plan\_risk}} = \frac{1}{T}\sum_{t=1}^T R_{\text{worst}}(\tau_t)$$
+预测轨迹（`ego_fut_preds`，增量 cumsum 还原绝对坐标）与 GT 轨迹（`ego_fut_gt`，同为增量、同样 cumsum 还原，两者同坐标系）沿程采样**最坏风险场** $R_{\text{worst}}$（Stage 4 第 2 步，over-K 的 max，即 minimax 语义）：
 
-按导航指令（`cmd`）只监督对应轨迹；$R_{\text{worst}}$ 经 `grid_sample` 双线性采样（坐标映射与 `col_attn` 的 reference_points 同约定）。**最小化 = 让预测轨迹避开最坏假设下的高风险格**（如"可能冲出人"的区域）。
+$$L_{\text{plan\_risk}} = \frac{1}{T}\sum_{t=1}^T \max\Big(0,\ R_{\text{worst}}(\tau_t) - R_{\text{worst}}(\tau_t^{\text{gt}}) - \mu\Big)$$
 
-#### 5.2 CVaR 风险约束（沿程风险尾部）
+按导航指令（`cmd`）只监督对应轨迹；$R_{\text{worst}}$ 经 `grid_sample` 双线性采样（坐标映射与 `col_attn` 的 reference_points 同约定；按有效步 `fut_w` 加权）。**最小化 = 让预测轨迹不比 GT 更接近最坏假设下的高风险格**（如"可能冲出人"的区域）。
 
-对指令轨迹沿程的 $R_{\text{exp}}$（期望风险）值集合求**空间尾部均值**（轨迹经过的最高风险段）：
+#### 5.2 CVaR 风险约束（沿程风险尾部，相对 GT 上界）
 
-$$\text{CVaR}_\beta = \text{mean}\big(\text{top}_{\lceil \beta T \rceil}\{R_{\text{exp}}(\tau_t)\}_{t=1}^T\big), \qquad L_{\text{plan\_cvar}} = \text{CVaR}_\beta$$
+对指令轨迹沿程的 $R_{\text{exp}}$（期望风险）值集合求**空间尾部均值**（轨迹经过的最高风险段），并与 GT 轨迹的尾部均值比较：
 
-关注轨迹的极端高风险段（如某个时刻恰好穿过鬼探头格），而非平均风险。
+$$\text{CVaR}_\beta = \text{mean}\big(\text{top}_{\lceil \beta T \rceil}\{R_{\text{exp}}(\tau_t)\}_{t=1}^T\big), \qquad L_{\text{plan\_cvar}} = \max\big(0,\ \text{CVaR}_\beta(\tau) - \text{CVaR}_\beta(\tau^{\text{gt}}) - \mu\big)$$
 
-#### 5.3 信息增益奖励与主动感知 (新增 ★)
+关注轨迹的极端高风险段（如某个时刻恰好穿过鬼探头格）**且比 GT 的极端段更危险**，而非平均风险。
 
-以"沿轨迹风险下降"度量主动感知——自车当前位置（ego 原点）风险 vs 轨迹末端风险：
+#### 5.3 信息增益奖励与主动感知 (新增 ★，相对 GT 上界)
 
-$$L_{\text{plan\_info}} = \max\big(0,\ R_{\text{exp}}(\tau_{\text{end}}) - R_{\text{exp}}(\text{ego})\big)$$
+以"沿轨迹风险下降"度量主动感知。自车原点（ego 起点）的风险对预测与 GT 两条轨迹**相同**（同一风险场、同一采样点），故相对形式退化为**末端风险差**：
 
-只惩罚"**末端风险高于起点**"（hinge 形式，2026-08 修订，ISSUE P1-1）——初稿 $L = -\big(R_{\text{exp}}(\text{ego}) - R_{\text{exp}}(\tau_T)\big)$ 无下界（起点处于高遮挡区时持续转负），会无限推离 GT。hinge 保留"鼓励朝风险降低方向走"的语义（末端风险 ≤ 起点即零惩罚），$\tau_{\text{end}}$ 取**最后有效步**（`fut_w` 定位）。闭环于 Stage 3.4 信念修正；单帧近似，T 步 rollout 为设计接口。
+$$L_{\text{plan\_info}} = \max\big(0,\ R_{\text{exp}}(\tau_{\text{end}}) - R_{\text{exp}}(\tau_{\text{end}}^{\text{gt}})\big)$$
+
+只惩罚"**末端风险高于 GT 末端**"——预测轨迹收敛到与 GT 同等的低风险末端即零惩罚，$\tau_{\text{end}}$ 取**最后有效步**（`fut_w` 定位）。单帧近似，T 步 rollout 为设计接口。
 
 #### 5.4 总规划目标
 
 $$L_{\text{plan}} = L_{\text{plan\_reg}} + \lambda_{\text{risk}} L_{\text{plan\_risk}} + \lambda_{\text{CVaR}} L_{\text{plan\_cvar}} + \lambda_{\text{info}} L_{\text{plan\_info}}$$
 
-其中 $L_{\text{plan\_reg}}$ 为原有 L1 轨迹回归（继承），新增三项权重进 `resworld_config.py`（`use_risk_plan` 总开关，0=关即基线）。
+其中 $L_{\text{plan\_reg}}$ 为原有 L1 轨迹回归（继承），新增三项权重进 `resworld_config.py`（`use_risk_plan` 总开关，0=关即基线；`risk_plan_margin` 为容差 $\mu$，warmup/ramp 见配置注释）。
 
-**与论文公式的对应（实现范式说明）**：设计初稿的"候选轨迹 + Minimax/CVaR 选择"在 ResWorld 单轨迹回归下不可行（argmin 不可微、训练仅 1 条 GT）。本实现采用**风险加权回归**（方案 A）：Minimax 通过 $R_{\text{worst}}$（over-K max）实现，CVaR 通过沿程风险尾部实现，信息增益通过起点-终点风险差实现——三者都是**可微的端到端规划正则**，保留保守性与主动感知的语义。
+**实现范式**：Minimax 通过 $R_{\text{worst}}$（over-K max）实现，CVaR 通过沿程风险尾部实现，信息增益通过终点风险差实现——三者都是**可微的端到端规划正则**，且都以 GT 轨迹风险为上界，保留保守性与主动感知的语义而不与模仿目标对抗（候选轨迹 + argmin 选择的不可微范式与单轨迹回归不兼容，故不采用）。
 
 **作用**: 
-- $L_{\text{plan\_risk}}$ 让轨迹避开最坏假设下的高风险区（鬼探头规避）；
-- $L_{\text{plan\_cvar}}$ 关注极端高风险段（防"平均风险低但某一刻危险"）；
+- $L_{\text{plan\_risk}}$ 让轨迹不进入比 GT 更接近最坏假设的高风险区（鬼探头规避）；
+- $L_{\text{plan\_cvar}}$ 约束极端高风险段不超过 GT 尾部水平（防"平均风险低但某一刻危险"）；
 - $L_{\text{plan\_info}}$ 鼓励主动探测（减速增距/横向偏移降低不确定性）。
 
-**为何如此设计**: 纯保守（直接最小化平均风险）会导致过度被动；信息增益项平衡安全与效率；方案 A 与 ResWorld 单轨迹回归兼容，可增量训练、消融干净（`use_risk_plan=False` 即基线）。
+**为何如此设计**: 绝对形式（直接最小化预测轨迹风险）与 L2 模仿目标结构性对抗——正常样本也会被无差别推开，伤害开环精度。相对上界把风险项变成**安全边际守卫**：正常样本（预测 ≈ GT）零梯度、L2 独占训练；只在模仿失败且不安全时介入。风险感知的职责是"在模仿边界内守卫安全"，而非替代模仿目标。
 
 ---
 
@@ -319,13 +316,23 @@ $$L_{\text{occ\_gt}} = \sum_{(x,y) \in \mathcal{O}_t} \text{BCE}\big(s_{\text{oc
 
 其中 $S_{\text{gt}}$ 由 `gt_bboxes_3d`（已在训练 batch）动态栅格化到 BEV 网格（二值：是否有动态障碍物），$s_{\text{occ}}$ 为遮挡区小占用头（1×1 Conv from `pred_bev`），**`pos_weight`（默认 5.0）惩罚漏报占用格**——遮挡区绝大多数格为空（类别不平衡），不加权会退化为全 0 平凡解，学到"遮挡区动态内容"。分工：**6.2 监督静态、6.2b 监督动态、6.3 维持假设分离**。$s_{\text{occ}}$ 输出被 Stage 4 风险场用作**占用驱动放大**（第 3 步的 $\gamma \cdot s_{\text{occ}}$）。
 
+#### 6.2c 风险场真实性锚定 (新增 ★)
+
+让风险场成为"未来内容变化"的**无偏估计**：风险代理的**原始强度**（未 detach、未限幅，与 Stage 4 的风险场同构）与真实暴露变化 $e^2$ 对齐：
+
+$$L_{\text{risk\_ground}} = \sum_{(x,y) \in \mathcal{O}_t} \Big( \frac{\sigma}{1+\sigma}\,\big\|\Delta B\big\| - \text{clip}(e^2, 0, E) \Big)^2$$
+
+- **监督对象**：π/σ/ΔB 的联合产物 $\frac{\sigma}{1+\sigma}\|\Delta B\|$（$\|\Delta B\|$ 取 K 维均值）——与 Stage 4 风险代理共享构成，属"分布塑造损失"一族（与 $L_{\text{occ\_halluc}}$/校准同向），与风险场对规划的 detach 契约（§4 梯度契约）不冲突；
+- **零额外数据**：$e^2$ 复用 6.4 的暴露误差（已 clamp 上界），遮挡区外不监督；
+- **效果**：风险场只在真实变化剧烈的区域非零——GT 轨迹上变化天然小 → 风险天然低 → Stage 5 的 GT 上界约束在正常样本上自动休眠，只在"偏离 GT 且真实危险"处激活。
+
 #### 6.3 多假设多样性损失 (新增)
 
 防止 $K$ 个假设坍缩为相似模式（**实现为余弦相似度**，单位化后有界 [-1,1]、梯度稳定）：
 $$L_{\text{div}} = \frac{2}{K(K-1)} \sum_{k_1 < k_2} \cos\big(\Delta B^{(k_1)},\, \Delta B^{(k_2)}\big) \cdot w_{\text{div}}$$
 最小化假设残差间的余弦相似度（鼓励方向分离），替代 KL 伪分布（MHST 假设是特征残差非分布）。
 
-**实现修订（2026-08，ISSUE P2-4）**：(a) **只在遮挡区计算**——可见区 ΔB 不进入融合输出（门控合成），推开可见区假设纯属浪费容量且无对向监督；(b) **clamp 到 ≥ 0**——负相似度（已分离）不奖励，损失有下界。
+**仅在遮挡区计算**——可见区 ΔB 不进入决策路径（多假设仅经风险场旁路），推开可见区假设无意义且无对向监督；**clamp ≥ 0**——负相似度（已分离）不奖励，损失有下界。
 
 #### 6.4 不确定性校准损失 (新增)
 
@@ -333,19 +340,19 @@ $$L_{\text{div}} = \frac{2}{K(K-1)} \sum_{k_1 < k_2} \cos\big(\Delta B^{(k_1)},\
 $$L_{\text{uncertainty}} = \sum_{(x,y) \in \mathcal{O}_t} \left| \sigma_{(x,y)} - \|e_{(x,y)}\|^2 \right|$$
 其中 $e_{(x,y)} = \hat{B}_{t+1}(x,y) - B_{t+\Delta t}^{\text{gt}}(x,y)$ 为**遮挡暴露误差**——与 6.2 的 $L_{\text{occ\_halluc}}$ **共享同一份暴露数据**（零额外成本）。σ 同时在 6.2 混合似然中作分布带宽被隐式监督、在本节被显式校准为预期误差，两者方向一致（误差大的位置 σ 大）。
 
-**实现修订（2026-08，ISSUE P1-4）**：$e^2$ 作为 σ 的**固定校准目标 detach**——不 detach 时 $\sigma$ 与 $e^2$ 经 $\Delta B$ 支路互相拉近（自证预言循环），校准失真；且 $\hat{B}_{t+1}$ 中确定性分支 $pb$ 同样 stop-gradient，暴露损失只训练 MHST 头（π/ΔB/σ）。
+**校准目标固定化**：$e^2$ 作为 σ 的**固定校准目标**（detach）——避免 σ 与 e² 经 ΔB 支路互相拉近导致的校准失真；$\hat{B}_{t+1}$ 中确定性分支 $pb$ 同样 stop-gradient，暴露损失只训练分布参数（π/ΔB/σ），不扰动确定性世界模型路径。
 
 #### 6.5 规划损失 (继承 + 改进)
 $$L_{\text{plan}} = L_{\text{plan\_reg}} + \lambda_{\text{risk}} L_{\text{plan\_risk}} + \lambda_{\text{CVaR}} L_{\text{plan\_cvar}} + \lambda_{\text{info}} L_{\text{plan\_info}}$$
-其中 $L_{\text{plan\_reg}}$ 为 ResWorld 原有 L1 轨迹回归，新增三项为 Stage 5 的风险加权规划（见 §5.1-5.3，`use_risk_plan` 开关，0=关即基线）。
+其中 $L_{\text{plan\_reg}}$ 为 ResWorld 原有 L1 轨迹回归，新增三项为 Stage 5 的风险加权规划（**相对 GT 上界形式**，见 §5.1-5.3，`use_risk_plan` 开关，0=关即基线）。
 
 #### 6.6 信息增益损失 (新增，即 §5.3 的 $L_{\text{plan\_info}}$)
-$$L_{\text{info}} = \max\big(0,\ R_{\text{exp}}(\tau_{\text{end}}) - R_{\text{exp}}(\text{ego})\big)$$
-鼓励轨迹朝"降低遮挡不确定性"的方向走（hinge：末端风险 ≤ 起点即零惩罚，有下界；2026-08 修订，ISSUE P1-1；单帧近似，T 步 rollout 为设计接口）。
+$$L_{\text{info}} = \max\big(0,\ R_{\text{exp}}(\tau_{\text{end}}) - R_{\text{exp}}(\tau_{\text{end}}^{\text{gt}})\big)$$
+鼓励轨迹末端收敛到与 GT 同等的低风险水平（相对上界：末端风险 ≤ GT 末端即零惩罚；单帧近似，T 步 rollout 为设计接口）。
 
 #### 6.7 总体损失
-$$L_{\text{total}} = \omega_2 L_{\text{occ\_halluc}} + \omega_2' L_{\text{occ\_gt}} + \omega_3 L_{\text{div}} + \omega_4 L_{\text{uncertainty}} + \omega_5 L_{\text{plan}}$$
-其中 $L_{\text{plan}}$ 已含 $L_{\text{plan\_reg}}$（L1）+ $L_{\text{plan\_risk}}$ + $L_{\text{plan\_cvar}}$ + $L_{\text{plan\_info}}$（即 $L_{\text{info}}$，见 §6.5/6.6）——**$L_{\text{info}}$ 是 $L_{\text{plan}}$ 的组成部分，不重复计项**；$L_{\text{recon}}$ 因 ResWorld 无未来 BEV 真值而不在总损失中（见 STATUS.md §6）。
+$$L_{\text{total}} = \omega_2 L_{\text{occ\_halluc}} + \omega_2' L_{\text{occ\_gt}} + \omega_{2c} L_{\text{risk\_ground}} + \omega_3 L_{\text{div}} + \omega_4 L_{\text{uncertainty}} + \omega_5 L_{\text{plan}}$$
+其中 $L_{\text{plan}}$ 已含 $L_{\text{plan\_reg}}$（L1）+ $L_{\text{plan\_risk}}$ + $L_{\text{plan\_cvar}}$ + $L_{\text{plan\_info}}$（即 $L_{\text{info}}$，见 §6.5/6.6）——**$L_{\text{info}}$ 是 $L_{\text{plan}}$ 的组成部分，不重复计项**；$L_{\text{recon}}$ 因 ResWorld 无未来 BEV 真值而不在总损失中。
 
 ---
 
@@ -354,11 +361,11 @@ $$L_{\text{total}} = \omega_2 L_{\text{occ\_halluc}} + \omega_2' L_{\text{occ\_g
 | 模块 | ResWorld (arXiv 2026) | OARWM-Res (本方案) |
 |---|---|---|
 | 场景表示 | BEV Feature Map (200×200×256, x:0.15 m/cell, y:0.3 m/cell 各向异性) | + OSZ 高度感知 BEV 遮挡掩码（200×200，与 ResWorld 网格同格，直接注入） |
-| 世界模型 | 确定性 latent-token 残差预测 | 可见区确定性 + 遮挡区多假设随机转移（分布 (π,σ,ΔB) 经 aux 旁路传导，路径 A） |
+| 世界模型 | 确定性 latent-token 残差预测 | 可见区确定性 + 遮挡区多假设随机转移（分布 (π,σ,ΔB) 经 aux 旁路传导，不回流共享 BEV 特征） |
 | 遮挡处理 | 隐式（数据驱动） | 显式几何约束 + 多假设想象 |
 | 风险度量 | 无显式风险场（隐式碰撞检查） | 语义不可知双风险场 R_exp/R_worst，不确定性（π 熵）驱动遮挡放大 |
-| 规划目标 | L2 模仿 + 碰撞避免 | 风险加权规划（沿程 R_worst Minimax 语义 + 沿程尾部 CVaR + 信息增益主动感知，可微端到端正则） |
-| 训练监督 | BEV 重建损失 | + 遮挡暴露自监督 + 假设多样性 + 不确定性校准（σ 训练契约） |
+| 规划目标 | L2 模仿 + 碰撞避免 | 风险正则化的模仿学习：GT 风险上界约束（沿程 R_worst Minimax 语义与沿程尾部 CVaR 带容差 μ、末端风险差信息增益无 μ，均为相对形式，预测≈GT 时零梯度） |
+| 训练监督 | BEV 重建损失 | + 遮挡暴露自监督 + 假设多样性 + 不确定性校准（σ 训练契约）+ 风险场真实性锚定（L_risk_ground，与暴露误差对齐） |
 | 推理速度 | 轻量 (~10-15 FPS) | 相当（MHST 可并行） |
 | 训练算力 | 8×RTX 3090 (24GB)，torch 1.9.1+cu111 | 训练延续 8×RTX 3090（torch 1.9.1 生态，与基线公平对比），全流程单机完成 |
 | 核心能力 | 时序残差预测 | 遮挡区内容想象 + 不确定性驱动保守决策 + 主动减少不确定性 |
@@ -370,7 +377,9 @@ $$L_{\text{total}} = \omega_2 L_{\text{occ\_halluc}} + \omega_2' L_{\text{occ\_g
 ### 5.1 数据集
 - **nuScenes**: 开环规划指标（L2 @ 1s/2s/3s, Collision Rate）；
 - **Bench2Drive**: 闭环驾驶得分，重点看 Merging / Emergency Brake / Give Way / Unprotected Turn；
-- **自建遮挡数据集**: 从 nuScenes / Bench2Drive 中筛选 parked car、truck、交叉口等遮挡比例 > 20% 的片段，构建遮挡场景子集。
+- **自建遮挡数据集**: 从 nuScenes / Bench2Drive 中筛选 parked car、truck、交叉口等遮挡比例 > 20% 的片段，构建遮挡场景子集；
+- **遮挡子集评估**：用 `tools/analysis_tools/filter_occ_subset.py` 从 OSZ npz（occ_frac > 20%）筛选 token 子集并重算开环 L2（ADE/stp3-FDE）——风险感知的价值必须在风险存在的地方度量；
+- **近遮挡减速行为统计**：用 `tools/analysis_tools/traj_behavior_stats.py` 统计掩码边界 5 m 内轨迹步的平均速度（预测 vs GT）——"接近遮挡物主动减速"的行为证据；配合可视化（STATUS.md §3.3）目视轨迹模式。
 
 ### 5.2 消融实验设计
 1. w/o 显式遮挡掩码（验证几何先验必要性）；
@@ -381,91 +390,10 @@ $$L_{\text{total}} = \omega_2 L_{\text{occ\_halluc}} + \omega_2' L_{\text{occ\_g
 6. w/o 不确定性校准（验证方差约束必要性）；
 7. OSZ 分层设计消融（`osz_eye` only vs `osz_ground` + `osz_eye`）；
 8. **风险场消融（Stage 4）**：R_exp only vs R_worst only（验证最坏假设保留的必要性）；不确定性放大 on/off（π 熵驱动 vs 常数 α 放大）；
-9. **风险代理消融（Stage 4 可选臂）**：语义不可知代理 vs 语义解码（有监督后，附录 A）。
+9. **风险代理消融（Stage 4 可选臂）**：语义不可知代理 vs 语义解码（有监督后）。
 
 ### 5.3 核心贡献
 1. 首次将 OSZ 高度感知显式遮挡几何注入轻量残差世界模型，提出 OA-RWM；
 2. 提出遮挡区多假设随机残差转移机制（MHST），在 BEV 特征空间实现遮挡区内容的概率化想象；
 3. 提出基于 Minimax-CVaR-信息增益的三层鲁棒规划目标，使系统自发学习"探头确认"行为；
 4. 提出遮挡暴露自监督与不确定性校准联合训练策略，无需额外标注即可监督遮挡区想象。
----
-
-## 6. 预期修改（V2：开环不劣于基线的风险感知设计）
-
-> **缘起**：2026-08 首轮评估中 OARWM 开环 L2 Avg 0.574 显著劣于同配置基线 0.300（+91%）。
-> 根因有两层：① 风险加权规划无条件最小化预测轨迹风险，与 L2 模仿目标结构性对抗；
-> ② 语义不可知风险代理在掩码过曝区弥漫大值，把轨迹系统性推离 GT。
-> 本节记录四项概念级修改——每项标明替换哪个阶段哪个部分与预期效果；实现指导见
-> STATUS.md §5。修改的出发点：**GT 轨迹本身就是安全驾驶示范**，风险感知的职责是在
-> 模仿边界内守卫安全，而不是替代模仿目标。
-
-### 6.1 GT 风险上界约束（替换 Stage 5 §5.1/§5.2/§5.3 与 Stage 6 §6.5/§6.6）
-
-**替换内容**：风险加权规划三项由"无条件最小化预测轨迹风险"改为"预测轨迹风险不超过
-GT 轨迹风险"的相对形式：
-
-$$L_{\text{plan\_risk}} = \max\Big(0,\ \overline{R}_{\text{worst}}(\tau_{\text{pred}}) - \overline{R}_{\text{worst}}(\tau_{\text{gt}}) - \mu\Big)$$
-
-$$L_{\text{plan\_cvar}} = \max\Big(0,\ \text{CVaR}\big(\tau_{\text{pred}}\big) - \text{CVaR}\big(\tau_{\text{gt}}\big) - \mu\Big)$$
-
-$$L_{\text{plan\_info}} = \max\Big(0,\ R_{\text{exp}}(\tau_{\text{end}}^{\text{pred}}) - R_{\text{exp}}(\tau_{\text{end}}^{\text{gt}})\Big)$$
-
-**概念**：GT 轨迹是人类安全示范，其沿程风险是"可接受安全水平"的上界；模型只需保证
-自己的轨迹不比 GT 更危险（$\mu$ 为容差）。当 $\tau_{\text{pred}} \approx \tau_{\text{gt}}$
-时三项全部为零——正常样本上风险项**零梯度**，开环 L2 回归独占训练。仅当模型偏离 GT
-**且更危险**（真正进入鬼探头高风险区）时才被拉回 GT 的安全水平。信息增益的起点
-（ego 原点）风险对两条轨迹相同，故其相对形式退化为末端风险差。
-
-**效果**：开环 L2 回到基线水平（理论下界为基线 + 0）；风险感知完整保留——任何比人类
-示范更危险的偏离都会被约束；"保守性"重新定义为"不劣于人类示范的安全性"，而非
-"全局最小化风险"。
-
-**为何如此设计**：V1 的绝对形式把风险项放在模仿目标的对立面（首轮 +91% L2 劣化即为
-实证）；相对形式让风险项成为**安全边际守卫**——只在模仿失败且不安全时介入，不参与
-正常样本的优化。学术叙事由"风险加权回归"升级为"风险正则化的模仿学习"。
-
-### 6.2 风险场真实性锚定（增强 Stage 4 风险场 + Stage 6 §6.2b）
-
-**概念**：语义不可知风险代理 $\sigma \cdot \|\Delta B\|$ 目前只被"内容变化强度"驱动，
-缺乏真实世界锚点，在掩码过曝区弥漫大值。新增锚定损失：风险代理的**原始强度**应与
-真实暴露变化 $e^2$（Stage 6 §6.4 已有的 next 帧暴露误差，零额外数据）对齐：
-
-$$L_{\text{risk\_ground}} = \text{MSE}\Big(w_\sigma\,\sigma_{\text{risk}}\,\big\|\Delta B\big\|\,M,\ \ \text{clip}(e^2, 0, E)\,M\Big)$$
-
-仅监督遮挡区（$M$ 门控）。风险场由此成为"未来内容变化"的**无偏估计**——GT 轨迹上
-变化天然小 → 风险天然低 → 6.1 的上界约束自动不触发。
-
-**效果**：风险场只在真实变化剧烈的区域非零，鬼探头感知的判别力提升；与 6.1 联合后
-风险项的作用域收缩到"偏离 GT 且真实危险"的样本，两者相互放大。
-
-**为何如此设计**：V1 的风险场"宁多勿少"（弥漫），是保守代价 L2 的直接来源；锚定使
-风险场**可信**——可信的保守才不伤害模仿精度，这与人类驾驶员的行为一致：确信的
-危险才减速，而非处处减速。
-
-### 6.3 MHST 与轨迹精修路径解耦（替换 Stage 3 §3.3 第 4 步的消费点）
-
-**概念**：`col_attn` 的 value 保持干净 `pred_bev`——几何精修不消费多假设融合特征；
-MHST 的多假设输出**仅以显式风险场的形式**注入决策（经 Stage 4→5 的风险项），走
-旁路而非污染共享 BEV 表征。Stage 2 残差式注入与 Stage 3 MHST 表达本身完整保留。
-
-**效果**：消除遮挡区 ΔB 扰动对轨迹精修的持续劣化（恢复基线 0.30 的精修上限）；
-设计原则"不确定性显式性"（§2 原则 2）在实现上更彻底——多假设信息以风险场
-（显式、可解释）而非隐式特征扰动的形式到达决策层。
-
-**为何如此设计**：基线证明干净 `pred_bev` 的精修有效；V1 把融合特征塞进注意力
-value，使世界模型的不确定性"泄漏"进几何精修。解耦后两者各司其职：世界模型负责
-"哪里不确定、可能是什么"，规划器负责"在风险信息下怎么走"——这正是 §2 四层链
-"每一层输出都是下一层的显式输入"的原意。
-
-### 6.4 评估侧学术补强（扩展 §5.1 预期实验）
-
-**概念**：即使开环 L2 与基线持平，"感知鬼探头"仍需要正面证据。新增三类评估：
-① 遮挡场景子集（遮挡比例 > 20%）上的 L2/碰撞率；② 接近遮挡物（掩码边界 5 m 内）
-时预测轨迹的平均减速行为 vs GT；③ 风险场与真实暴露变化的校准曲线（AUC）——
-风险场质量的可测量指标。
-
-**效果**：论文侧形成"L2 持平基线 + 遮挡子集碰撞率更低 + 减速行为 + 风险场校准"
-的完整证据链，把"感知鬼探头"从口号变为可验证的结论。
-
-**为何如此设计**：开环 L2 衡量模仿精度，与风险感知无直接关系；风险感知的价值必须
-在**风险存在的地方**（遮挡子集）与**风险场本身的质量**（校准）上度量，三者互补。

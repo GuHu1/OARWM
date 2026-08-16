@@ -69,7 +69,7 @@ use_risk_plan = True             # False = skip risk-weighted planning losses
 # (P0-2), the risk terms can no longer dominate training.
 loss_plan_risk_weight = 0.1      # minimax-style mean step risk (soft regulariser)
 loss_plan_cvar_weight = 0.1      # CVaR of the step-risk tail (soft regulariser)
-loss_plan_info_weight = 0.05     # info gain (hinge: end risk above start)
+loss_plan_info_weight = 0.05     # info gain（末端风险差：pred vs GT，无 margin）
 cvar_beta = 0.25                 # CVaR tail fraction of the trajectory steps
 assert (not use_risk_plan) or use_risk_field, \
     'use_risk_plan (Stage 5) requires use_risk_field (Stage 4)'
@@ -80,6 +80,10 @@ loss_occ_halluc_weight = 1.0     # exposure mixture likelihood
 loss_uncertainty_weight = 1.0    # σ calibration
 loss_occ_gt_weight = 1.0         # detection-box BEV occupancy BCE
 loss_occ_gt_pos_weight = 5.0     # BCE pos_weight (penalise missed occupancies)
+# risk-field grounding (design doc §6.2c): anchors the raw risk
+# intensity (sigma-weighted ||dB||) to the exposure error e2 — zero extra
+# data; makes the risk field an unbiased "future content change" estimate.
+loss_risk_ground_weight = 0.1    # 0 disables the term
 
 #
 plugin = True
@@ -230,6 +234,7 @@ model = dict(
         loss_uncertainty_weight=loss_uncertainty_weight,
         loss_occ_gt_weight=loss_occ_gt_weight,
         loss_occ_gt_pos_weight=loss_occ_gt_pos_weight,
+        loss_risk_ground_weight=loss_risk_ground_weight,  # grounding
         use_risk_plan=use_risk_plan,
         loss_plan_risk_weight=loss_plan_risk_weight,
         loss_plan_cvar_weight=loss_plan_cvar_weight,
@@ -241,6 +246,9 @@ model = dict(
         # activation epoch (2026-08-13/14 log); the ramp lets reg settle
         # smoothly (expected final: reg slightly above init, ~5%).
         risk_plan_ramp_epochs=2,
+        # GT-risk upper-bound margin (design doc §5.1): risk terms are
+        # relative — max(0, R(pred) - R(gt) - margin); 0 = pure upper bound.
+        risk_plan_margin=5.0,
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,
