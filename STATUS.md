@@ -225,19 +225,105 @@ python OSZ/export_osz_dataset.py --dataroot data/nuscenes --version v1.0-trainva
 
 ---
 
-## 5. 设计但未实现（及原因）
+## 5. 计划改动（V2：开环不劣于基线 + 鬼探头感知，实现指导）
 
-- **L_recon（可见区 BEV 重建）**：ResWorld 无未来 BEV 真值监督（BEV 特征是编码器输出而非标签），无逐帧重建目标；可见区监督由 latent 残差路径 + 规划损失承担。
-- **语义解码臂（附录 A 的 `RiskWeight` 类别加权）**：需语义监督（lidarseg 或检测框类别栅格化）；主方案保持语义不可知（无监督语义不可信），仅保留为可选臂设计。
-- **时空演化 rollout（R_{t+τ}）**：ResWorld 单帧推理，无 T 步未来 rollout；当前为单帧风险场 R_t，时变重采样为接口。
-- **Stage 3.4 遮挡-可见边界交互（π 信念修正）**：需下一帧观测 B_{t+1}^{obs} 修正假设权重，单帧推理无法提供，为设计接口。
-- **显式离散假设类别（K 假设绑定空路/静止车/行人等语义）**：K 个 expert 是隐式假设（语义由数据塑造，EM 式软分配），未做类别标签绑定——混合模型常规做法，论文表述为"潜变量假设，语义由数据塑造"。
+> 背景（2026-08 首轮评估）：OARWM L2 Avg 0.574 vs 基线实测 0.300（+91%）、stp3 Avg
+> 1.055 vs 0.586。概念设计见 OARWM_ResWorld.md §6（6.1-6.4 四项修改）；本节是逐项
+> **实现指导**。实现顺序 = 编号顺序，每项独立可验证（改完一项 12 epoch + 评估对照
+> §3.2 基线行）；每项改动提交前 `python -m py_compile` 检查。
 
----
+### 5.1 改动 1：GT 风险上界损失（`resworld_head.py::loss`）
 
-## 6. 已知限制
+替换位置：`loss` 的 Stage-5 块（`if risk_active:` 内三项）。概念对应
+OARWM_ResWorld.md §6.1。
 
-- **深度范围**：MiDaS 输出逆深度经 LiDAR 对齐后为 metric 深度，但无 LiDAR 区域仅相对深度；
-- **OSZ 网格前方仅 ±15 m**（跟随 ResWorld `grid_config`）：>15 m 前方遮挡物不在世界模型 BEV 内；若需更远需同时改 `grid_config` 与 `OSZ/config.py`（单一来源同步）；
-- **各向异性近似**：射线投射在 cell 空间为直线，物理空间角度略拉伸（0.15 vs 0.3 m/cell）；
-- **drivable 膨胀**：按较粗轴（0.3 m）迭代，x 方向实际膨胀 0.75 m（1.5 m 设定折半），偏保守方向安全。
+实现步骤：
+
+1. **GT 轨迹采样**：`ego_fut_gt` 是**绝对坐标** `(B, M, T, 2)`（与
+   `traj_abs = ego_fut_preds.cumsum(2)` 同坐标系、同一 cmd 语义）。GT 网格：
+   `nx_gt = (ego_fut_gt[..., 0] - gmin[0]) / (gsz[0] * 200)`、`ny_gt` 同法，`*2-1`
+   归一化；与 pred grid 拼成一个 `grid_sample` 调用采样同一 `risk_field`
+   （一次采样得 `r_worst_pred (B,M,T)` 与 `r_worst_gt (B,M,T)`）。
+2. **cmd 加权**：`r_gt_cmd = (r_worst_gt * cmd_w.unsqueeze(-1)).sum(1)`，与
+   `r_cmd` 同一约定。
+3. **risk**：`loss_plan_risk = mean(max(0, r_cmd - r_gt_cmd - margin) * fut_w)
+   * loss_plan_risk_weight * risk_scale`（fut_w 对两条轨迹相同；warmup/ramp 机制
+   照乘不动）。
+4. **CVaR**：`max(0, topk(r_cmd) - topk(r_gt_cmd) - margin)`，topk 前同样乘
+   `fut_w`（沿用 P2-1 修复）。
+5. **info**：起点（ego 原点）风险对两轨迹相同 → 相对形式退化为
+   `max(0, r_end_pred - r_end_gt)`；`r_end_gt` 用与 `r_end_pred` 相同的"最后有效步"
+   gather 逻辑（`fut_w` 定位）。
+6. **新超参 `risk_plan_margin`**：默认 **5.0**（风险单位；正常 `rf_occ` 15-30，
+   5 ≈ 1/3 容差；0 = 纯上界，先 5.0 起步）。加三处：`resworld_config.py` 顶层 +
+   `pts_bbox_head` 参数传入 + `ResWorldHead.__init__` 默认值。
+7. **预期**：`loss_plan_risk/cvar` 在多数样本上 ≈0（稀疏激活）；`loss_plan_reg` 与
+   `loss_plan_reg_init` 差距消失；评估 L2 回到基线 ±0.05。
+
+### 5.2 改动 2：col_attn 用干净 pred_bev（`resworld_head.py::forward`）
+
+替换位置：`forward` 的 MHST 块（`if self.use_oarwm and osz_mask is not None:`）。
+概念对应 OARWM_ResWorld.md §6.3。
+
+实现步骤：
+
+1. 在 `fused, mhst_aux = self.mhst(pb, mhst_mask)` 之前保存引用
+   `pred_bev_clean = pred_bev`（MHST 之后 `pred_bev` 变量会被 fused 覆盖）。
+2. fused 计算后**不再覆盖** `pred_bev`（即 col_attn 的 value 用干净特征）；
+   `fused` 张量直接丢弃——其信息已由 `outs['mhst']`（π/σ/ΔB）与风险场承载。
+3. 下游不动：`outs['pred_bev']` 为干净版本；风险场仍从 aux 构造（不依赖 fused）；
+   暴露损失仍用 `mhst_aux['pred_bev_4d']`。
+4. **检查**：MHST 参数梯度仍来自 Stage-6 损失（occ_halluc/uncertainty/div/occ_gt），
+   无 DDP unused 参数问题；`use_oarwm=False` 路径完全不变。
+5. **预期**：评估 L2 恢复到基线精修上限（0.30 水平）；风险感知仍经 risk 项生效
+   （风险场构造与 fused 无关）。
+
+### 5.3 改动 3：风险场真实性锚定（`resworld_head.py::loss` 新增损失）
+
+替换位置：`loss` 的 Stage-6 块（`if mhst is not None:` 内、`gt_next` 分支中）。
+概念对应 OARWM_ResWorld.md §6.2。零额外数据（复用已有 e2）。
+
+实现步骤：
+
+1. **真值变化代理**：e2 已存在（`e2 = (b_hat.detach()-gt_next).pow(2).mean(1,
+   keepdim=True)`，暴露误差 `(B,1,H,W)`）；目标 =
+   `e2.clamp(max=E)`，E 默认复用 `mhst_sigma_max`（10）。
+2. **风险代理原始强度（未 detach 版本）**：
+   `r_raw = (sigma / (1 + sigma)) * delta.norm(dim=2).mean(dim=1, keepdim=True)
+   * mask`（σ、ΔB 均**不 detach**——grounding 属"分布塑造损失"，与
+   build_risk_field 的 P0-2 detach 契约不冲突：该契约只约束"风险场→规划"方向）。
+3. **损失**：`loss_risk_ground = MSE(r_raw, e2_clamped) * mask`（遮挡区均值）×
+   `loss_risk_ground_weight`（**新超参**，默认 0.1；config 顶层 + head 参数 + 默认值）。
+4. **说明**：该损失训练 π/σ/ΔB 使风险强度与真实暴露对齐；mask 之外不监督；
+   `loss_risk_ground_weight=0` 即关闭。
+5. **预期**：风险场收敛为"未来内容变化"的无偏估计 → GT 轨迹附近风险天然低 → 与
+   5.1 上界约束联合后，risk 项只在"偏离 GT 且真实危险"处激活。
+   可选扩展（暂不做）：next 帧检测框占用做更精确目标（需数据管线加载 next 帧
+   检测框，改动大）。
+
+### 5.4 改动 4：评估侧补强（新脚本，不动训练）
+
+概念对应 OARWM_ResWorld.md §6.4。
+
+1. **遮挡子集筛选** `tools/analysis_tools/filter_occ_subset.py`：读 `data/osz/*.npz`
+   （midas 导出掩码）统计每 token 的 occ_frac，筛选 >20% 的 token 列表；对评估落盘的
+   `results_nusc.pkl`（含 sample_token）过滤后重算 L2/CR（复用现有评估函数，只换
+   样本子集）。注意：主配置为在线 rcsample 掩码，与 midas npz 不完全一致——筛选
+   标准以 midas npz 为准（导出完成后可用）。
+2. **减速行为统计** `tools/analysis_tools/traj_behavior_stats.py`：从结果 pkl 读
+   预测/GT 轨迹；对每个样本统计"掩码边界 5 m 内轨迹段"的平均速度（预测 vs GT），
+   输出整体减速比——"接近遮挡物主动减速"的行为证据。
+3. **风险场校准（可选）**：test 时每样本保存 `risk_field` 遮挡区均值 + `e2` 均值
+   （`simple_test` 小改，加一个可选 dump 开关），离线算 AUC/校准曲线。
+4. **预期**：论文证据链——"L2 持平基线 + 遮挡子集 CR 更低 + 减速行为 + 风险场
+   校准"四项证明"感知鬼探头"。
+
+### 5.5 实施顺序与验证
+
+1. 顺序：5.1 → 5.2 → 5.3 → 5.4（每步独立重训验证，与 §3.2 基线行对照）；
+2. 每项改完：`py_compile` → 12 epoch → `dist_test` → 对照基线实测
+   （L2 Avg 0.300 / stp3 Avg 0.586）；
+3. 目标线：改动 1+2 后 L2 ≤ 0.35（基线 +0.05）、CR 不高于基线；改动 3 后风险场
+   AUC 可测；改动 4 补齐论文证据。
+4. 超参汇总：新增 `risk_plan_margin=5.0`、`loss_risk_ground_weight=0.1`；
+   既有 risk 三项权重 0.1/0.1/0.05 与 warmup/ramp 不动。
