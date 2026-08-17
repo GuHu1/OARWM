@@ -27,8 +27,8 @@
 
 ```python
 # ---- Stage 2 掩码源（互斥）----
-use_osz_midas = False      # 离线 npz（需先导出 data/osz）
-use_osz_rcsample = True    # 在线同源（模型自身 RCSample 深度实时生成）
+use_osz_midas = True       # 离线 npz（主配置 2026-08-18；需先导出 data/osz）
+use_osz_rcsample = False   # 在线同源（模型自身 RCSample 深度实时生成；部署形式）
 use_osz = use_osz_midas or use_osz_rcsample   # head 注入总闸
 
 # ---- Stage 3 MHST ----
@@ -48,7 +48,7 @@ loss_plan_risk_weight = 0.1    # 沿程 R_worst，相对形式 max(0, R(pred)-R(
 loss_plan_cvar_weight = 0.1    # CVaR 尾部（topk 前乘 fut_w，相对 GT 尾部）
 loss_plan_info_weight = 0.05   # 信息增益（末端风险差：pred vs GT）
 cvar_beta = 0.25               # 风险尾部比例
-risk_plan_margin = 5.0         # 容差 μ（风险单位）；0 = 纯上界
+risk_plan_margin = 1.0         # 容差 μ（风险单位）；0 = 纯上界；5.0→1.0（08-17 日志 loss_plan_risk/cvar 恒 0：r_cmd 仅 0.2-0.8，margin 5 永不激活）
 # risk_plan_warmup_epochs=2 + risk_plan_ramp_epochs=2（head 参数）：warmup 后
 # risk 权重线性 0→1 爬升，替代硬切换（硬切换曾使 loss_plan_reg 0.53→1.24 跳变）
 
@@ -123,28 +123,24 @@ bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
 ### 3.1 评估命令
 
 ```bash
-bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
-    work_dirs/oa_resworld_config/epoch_12_ema.pth 4 --eval bbox
+CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash tools/dist_test.sh projects/configs/resworld/resworld_config.py work_dirs/oa_resworld_config/epoch_12_ema.pth 4 --eval bbox > work_dirs/oa_resworld_config/eval.log 2>&1 &
 ```
 
 ### 3.2 指标与参考（UniAD/VAD 风格开环）
 
-**L2（ADE，当前采用的表格口径）：**
+**L2（ADE）：**
 
-| 配置 | L2 1s | L2 2s | L2 3s | L2 Avg |
-|---|---|---|---|---|
-| 官方参考 AVG | 0.14 | 0.27 | 0.49 | 0.30 |
-| **基线实测（纯 ResWorld，12 epoch，开关全关）** | 0.142 | 0.271 | 0.486 | **0.300** |
-| OARWM 首轮（2026-08-16，epoch_12_ema） | 0.285 | 0.543 | 0.896 | 0.574 |
+| 配置 | L2 1s | L2 2s | L2 3s | L2 Avg | CR 1s | CR 2s | CR 3s | CR Avg |
+|---|---|---|---|---|---|---|---|---|
+| **ResWorld** | 0.142 | 0.271 | 0.486 | **0.300** | 0.02 | 0.06 | 0.43 | **0.17** |
+| OARWM（2026-08-17，epoch_12_ema） | 0.171 | 0.328 | 0.571 | 0.357 | 9.8e-5 | 4.9e-4 | 1.7e-3 | 7.6e-4 |
 
 **L2_stp3（终点 FDE）：**
 
-| 配置 | stp3 1s | stp3 2s | stp3 3s | stp3 Avg |
-|---|---|---|---|---|
-| **基线实测（纯 ResWorld，12 epoch）** | 0.185 | 0.493 | 1.081 | **0.586** |
-| OARWM 首轮（2026-08-16） | 0.375 | 0.982 | 1.808 | 1.055 |
-
-碰撞率（CR）：OARWM 首轮 ≈ 0 / 1e-4 / 1e-4（1s/2s/3s，过度保守画像，见 ISSUE 首轮评估记录）；基线 CR 待补。
+| 配置 | stp3 1s | stp3 2s | stp3 3s | stp3 Avg | CR 1s | CR 2s | CR 3s | CR Avg |
+|---|---|---|---|---|---|---|---|---|
+| **ResWorld** | 0.185 | 0.493 | 1.081 | **0.586** | 0.01 | 0.03 | 0.14 | **0.06** |
+| OARWM（2026-08-17） | 0.226 | 0.591 | 1.237 | 0.685 | 2.0e-4 | 1.2e-3 | 5.3e-3 | 2.2e-3 |
 
 ### 3.3 可视化评估结果
 

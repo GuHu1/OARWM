@@ -17,8 +17,15 @@ _base_ = [
 #                    transformer) produces the mask inside the train/test
 #                    loop (GPU OSZ geometry adds tens of ms/step).
 # One switch per stage; later stages (3+) get their own flags.
-use_osz_midas = False
-use_osz_rcsample = True
+# 2026-08-18: switched to the offline MiDaS masks (route A). The online
+# rcsample masks tracked the model's own depth head, whose loss sat at
+# ~0.7 and pushed occ_frac to 0.58-0.86 (ISSUE.md P1-3) — the mask
+# over-exposure was the top suspect for the L2 gap vs baseline. MiDaS +
+# LiDAR-aligned masks are stable; online stays the deployment form.
+# Requires data/osz fully exported with --use_drivable BEFORE training
+# (missing npz falls back to all-zeros = unconstrained samples).
+use_osz_midas = True
+use_osz_rcsample = False
 assert not (use_osz_midas and use_osz_rcsample), \
     'use_osz_midas and use_osz_rcsample are mutually exclusive'
 # Drivable-area constraint for the ONLINE mask: the dataset loads the
@@ -71,6 +78,15 @@ loss_plan_risk_weight = 0.1      # minimax-style mean step risk (soft regularise
 loss_plan_cvar_weight = 0.1      # CVaR of the step-risk tail (soft regulariser)
 loss_plan_info_weight = 0.05     # info gain（末端风险差：pred vs GT，无 margin）
 cvar_beta = 0.25                 # CVaR tail fraction of the trajectory steps
+# REVIEWED 2026-08-18: 5.0 was calibrated off rf_occ (~10-30), which was the
+# WRONG baseline — the trajectory only ever SAMPLES r_cmd ≈ 0.2-0.8 of that
+# field (the high-risk cells are off the path). Against ~0.5 the margin 5.0
+# made max(0, Dr - 5.0) identically 0 and loss_plan_risk/cvar stayed 0.0000
+# for the whole run — Stage-5 minimax/CVaR were never exercised. 1.0 ≈ 1-2
+# typical step-risks: it still tolerates field noise around the GT path but
+# activates when the predicted path is clearly riskier. Re-check against the
+# new [DIAG] r_gt_cmd_mean after the MiDaS mask switch changes the field.
+risk_plan_margin = 1.0           # 容差 μ（风险单位）；0 = 纯上界
 assert (not use_risk_plan) or use_risk_field, \
     'use_risk_plan (Stage 5) requires use_risk_field (Stage 4)'
 
@@ -188,11 +204,11 @@ model = dict(
         ins_channels=[512],
         out_channels=numC_Trans,
         depthnet_cfg=dict(use_dcn=False, aspp_mid_channels=96),
-        # P1-3 transition (2026-08-13): depth weight raised 0.1->0.3 while
-        # use_osz_drivable stays OFF (data/osz midas export in progress) — the
-        # online (rcsample) mask quality depends on this depth head. Revert to
-        # 0.1 once drivable-constrained masks are enabled.
-        loss_depth_weight=[0.3],
+        # P1-3 closed (2026-08-18): mask source moved to the offline MiDaS
+        # npz (use_osz_midas=True), so the online mask no longer depends on
+        # this depth head. Back to the baseline weight 0.1 — at 0.3 the
+        # depth loss was ~0.7, the single largest term of total loss ~2.2.
+        loss_depth_weight=[0.1],
         downsamples=[16]),
     img_bev_encoder_backbone=dict(
         type='CustomResNet',
@@ -248,7 +264,9 @@ model = dict(
         risk_plan_ramp_epochs=2,
         # GT-risk upper-bound margin (design doc §5.1): risk terms are
         # relative — max(0, R(pred) - R(gt) - margin); 0 = pure upper bound.
-        risk_plan_margin=5.0,
+        # 1.0 ≈ 1-2 typical r_cmd values (path-sampled risk ~0.2-0.8, see
+        # config top-level risk_plan_margin); was 5.0 which never fired.
+        risk_plan_margin=risk_plan_margin,
         latent_decoder=dict(
             type='CustomTransformerDecoder',
             num_layers=3,

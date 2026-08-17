@@ -992,6 +992,7 @@ class ResWorldHead(BaseModule):
             rf_occ = ((risk_field * msk).sum()
                       / msk.float().sum().clamp(min=1.0)).item()
             rc = r_cmd.detach()                      # (B,T) commanded risk
+            rgc = r_gt_cmd.detach()                  # (B,T) GT commanded risk
             # Trajectory-shape diagnostics (over-conservatism probe,
             # 2026-08-16 eval: L2 ~0.57 avg & CR ~1e-4 -> suspected
             # shrunken/slow trajectories; these two stats make the
@@ -1005,6 +1006,7 @@ class ResWorldHead(BaseModule):
             self._diag_msg = (
                 f"[DIAG] occ_frac={occ_frac:.3f} rf_mean={rf_mean:.5f} "
                 f"rf_occ={rf_occ:.5f} r_cmd_mean={rc.mean().item():.5f} "
+                f"r_gt_cmd_mean={rgc.mean().item():.5f} "
                 f"r_cmd_pos_frac={(rc > 0).float().mean().item():.3f} "
                 f"traj_end={traj_end:.2f}m traj_step={traj_step:.2f}m")
 
