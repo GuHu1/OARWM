@@ -24,8 +24,7 @@ conda install -c conda-forge libxcrypt -y
 pip install torch==1.9.1+cu111 torchvision==0.10.1+cu111 torchaudio==0.9.1 \
     -f https://download.pytorch.org/whl/torch_stable.html
 pip install ninja plyfile black flake8 plotly pytest pyquaternion shapely tqdm tensorboard geffnet
-pip install "numpy==1.19.5" "matplotlib==3.5.3" "scikit-image==0.19.3" "networkx==2.2" "pandas==1.4.4" "yapf==0.31.0"
-pip install "numba==0.56.4"
+pip install "numpy==1.19.5" "matplotlib==3.5.3" "scikit-image==0.19.3" "networkx==2.2" "pandas==1.4.4" "yapf==0.31.0" "trimesh==2.35.39" "numba==0.48.0"
 pip install "timm==0.6.13"
 pip install mmcv-full==1.4.0 \
     -f https://download.openmmlab.com/mmcv/dist/cu111/torch1.9/index.html
