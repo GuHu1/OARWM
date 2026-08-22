@@ -133,9 +133,6 @@ done
 
 # 完成检查：8 个进程退出后，npz 数应为 34149
 ls data/osz | wc -l
-grep -l Traceback work_dirs/logs/osz_shard_*.log
-
-ls data/osz | wc -l   # 全量 = 34149（train 28130 + val 6019）
 ```
 
 输出 `data/osz/{token}.npz`（`bev_height / osz_ground / osz_eye / semi / drivable_mask`，200×200）。训练时 `resworld_config.py` 的 `osz_dir='data/osz/'` 自动按 token 加载。

@@ -75,11 +75,10 @@ use_risk_field = False       # 不算风险场
 use_risk_plan = False        # 不算风险规划损失
 ```
 
-然后照常训练（用独立 `--work-dir` 防快照覆盖）：
+然后照常训练：
 
 ```bash
-bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4 \
-    --work-dir work_dirs/abl_baseline
+CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4 > /data2/jhc/OARWM/work_dirs/train.log 2>&1 &
 ```
 
 要点：
@@ -94,8 +93,7 @@ bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4 \
 conda activate resworld
 # 前置：data/nuscenes/ 与 ckpts/geobev-r50-nuimage-cbgs.pth 就绪
 # 掩码源：use_osz_rcsample（在线，无需导出）或 use_osz_midas（离线，先导 data/osz）
-bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4
-# 指定 GPU：CUDA_VISIBLE_DEVICES=4,5,6,7 bash tools/dist_train.sh ...
+CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash tools/dist_train.sh projects/configs/resworld/resworld_config.py 4 > /data2/jhc/OARWM/work_dirs/train.log 2>&1 &
 ```
 
 - 输出 `work_dirs/oa_resworld_config/`，EMA 权重 `epoch_12_ema.pth`（CLI `--work-dir` 可覆盖）；

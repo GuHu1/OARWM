@@ -149,13 +149,18 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
         if self.use_osz:
             # Stage-2 OSZ masks (see OSZ/export_osz_dataset.py). Missing npz
             # falls back to all-zeros (= identity for the fusion).
+            # .copy(): the cache stores read-only arrays (flags.writeable =
+            # False) to protect the lru_cache from in-place corruption;
+            # handing the read-only array to the pipeline would trigger the
+            # torch "NumPy array is not writeable" UserWarning at collate
+            # (once per DataLoader worker, flooding the training log).
             input_dict['osz_mask'] = _load_osz_mask(
-                self.osz_dir, info['token'])
+                self.osz_dir, info['token']).copy()
         if self.use_osz_rcsample and self.use_osz_drivable:
             # Drivable-area constraint for the online mask (optional; None
-            # when the offline npz is missing).
-            input_dict['drivable_mask'] = _load_drivable_mask(
-                self.osz_dir, info['token'])
+            # when the offline npz is missing). Same .copy() as above.
+            dr = _load_drivable_mask(self.osz_dir, info['token'])
+            input_dict['drivable_mask'] = None if dr is None else dr.copy()
         if 'occ_path' in info:
             input_dict['occ_gt_path'] = info['occ_path']
         # lidar to ego transform
