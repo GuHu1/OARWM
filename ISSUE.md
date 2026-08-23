@@ -155,7 +155,7 @@
 
 ---
 
-## P1-3 [mitigated] 在线掩码（`use_osz_rcsample=True`）质量依赖模型自身深度
+## P1-3 [fixed] 离线掩码路径未应用 drivable 交集 → occ_frac 过曝
 
 - **位置**：`resworld.py` `forward_train`（`build_osz_mask_online`，no_grad）
 - **现象（已由 [DIAG] 实证，2026-08-13）**：`occ_frac = 0.42-0.48`——遮挡格占比接近
@@ -171,7 +171,7 @@
 - **过渡措施（2026-08-13）**：drivable 未开期间，`loss_depth_weight` 0.1→0.3
   提升 RCSample 深度头质量（在线掩码的直接依赖）；导出完成后回退 0.1 并置
   `use_osz_drivable=True`。另见 P0-3（掩码轴序转置修复）。
-- **状态**：`mitigated`（2026-08-18 主配置切离线 MiDaS）——`use_osz_midas=True / use_osz_rcsample=False`，掩码不再依赖模型自身深度头（`loss_depth` 同步回退 0.1）；在线 rcsample 保留为部署形式与深度来源消融臂。**2026-08-17 日志仍实测 `occ_frac = 0.58-0.86`、`rf_occ ≈ 9-13`, `loss_depth ≈ 0.7`**——即切换前的掩码过曝与深度质量差被最新一轮训练证明确实存在。待 `data/osz` 用 `--use_drivable` 导出完成、离线掩码重训后核对 `occ_frac` 回落与 L2 收敛；若离线掩码下 `occ_frac` 仍偏高，再考虑对在线 rcsample 启用 `use_osz_drivable=True`（`build_osz_mask_online` 已实现 `osz &= drivable`）。
+- **状态**：`fixed`（2026-08-23 根治）——根因不是深度来源，而是 **offline 路径从未应用 drivable 交集**：`_load_osz_mask` 只 stack 三通道、不读 `drivable_mask`；`export_osz_dataset.py --use_drivable` 只把 drivable 存进 npz 而不与 osz 取交集。因此无论 online depth / offline midas，训练 `occ_frac` 恒 ~0.67。**实测验证（`mask_stats.py`，200 样本）：`osz_eye` raw avg 0.681 → ∩drivable avg 0.130（保 19.1%）**，证明过曝是路外遮罩而非几何/深度。修复：`_load_osz_mask(use_drivable=...)` 加载时 `mask *= drivable`（缺信道恒等）+ `use_osz_drivable=True`；另补 P1-4 梯度契约（`pb.detach()` 于 MHST/occ_head 输入前）。重训后 `occ_frac` 预期 ~0.13。
 
 ---
 
