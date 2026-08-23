@@ -37,7 +37,8 @@ def _load_drivable_mask(osz_dir: Optional[str], token: str) -> Optional[np.ndarr
 
 
 @functools.lru_cache(maxsize=2048)
-def _load_osz_mask(osz_dir: Optional[str], token: str) -> np.ndarray:
+def _load_osz_mask(osz_dir: Optional[str], token: str,
+                   use_drivable: bool = False) -> np.ndarray:
     """Load the precomputed OSZ mask for a sample token.
 
     Returns a ``(3, 200, 200)`` float32 array of channels
@@ -46,6 +47,11 @@ def _load_osz_mask(osz_dir: Optional[str], token: str) -> np.ndarray:
     (= fully visible, identity for the injection) when ``osz_dir`` is unset
     or the npz is missing, so training stays strictly equivalent to the
     baseline without OSZ.
+
+    ``use_drivable``: intersect all three channels with the npz's
+    ``drivable_mask`` channel — off-road shadows must not gate on-road
+    planning (ISSUE.md P1-3). Identity when the channel is missing
+    (npz exported without ``--use_drivable`` stores an all-True mask).
     """
     if osz_dir:
         path = os.path.join(osz_dir, f"{token}.npz")
@@ -56,12 +62,16 @@ def _load_osz_mask(osz_dir: Optional[str], token: str) -> np.ndarray:
                     data["osz_ground"].astype(np.float32),
                     data["semi"].astype(np.float32),
                 ])
+                drivable = (data["drivable_mask"].astype(bool)
+                            if "drivable_mask" in data else None)
             # Fail loudly on grid drift instead of silently misaligning.
             if mask.shape != (3, 200, 200):
                 raise ValueError(
                     f"osz mask for {token} has shape {mask.shape}, expected "
                     "(3, 200, 200) — resync OSZ/config.py with grid_config."
                 )
+            if use_drivable and drivable is not None:
+                mask = mask * drivable[None].astype(np.float32)
             # Shared cache entries must be read-only: no in-place writes.
             mask.flags.writeable = False
             return mask
@@ -155,7 +165,8 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
             # torch "NumPy array is not writeable" UserWarning at collate
             # (once per DataLoader worker, flooding the training log).
             input_dict['osz_mask'] = _load_osz_mask(
-                self.osz_dir, info['token']).copy()
+                self.osz_dir, info['token'],
+                use_drivable=self.use_osz_drivable).copy()
         if self.use_osz_rcsample and self.use_osz_drivable:
             # Drivable-area constraint for the online mask (optional; None
             # when the offline npz is missing). Same .copy() as above.

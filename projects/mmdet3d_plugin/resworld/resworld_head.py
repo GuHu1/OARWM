@@ -649,6 +649,19 @@ class ResWorldHead(BaseModule):
             #  * The OSZ mask is (B, 3, 200, 200) (grid_config); the BEV
             #    feature is 100x100, so the mask is downsampled (nearest).
             pb = pred_bev.permute(0, 2, 1).reshape(bs, c, h, w)
+            # Gradient contract (ISSUE.md P1-4, completed 2026-08-23):
+            # detach the world-model BEV before the MHST / occ heads
+            # consume it. P1-4 stopped the additive b_hat branch but left
+            # the conv-INPUT path live — the Stage-6 exposure losses
+            # (halluc / uncertainty / ground / div / occ_gt) flowed through
+            # prior_conv / backbone / experts / sigma_net / occ_head back
+            # into pred_bev, pulling the deterministic world model away
+            # from serving the planner (occ_frac ~0.67 made this a
+            # map-wide distortion, the top suspect for the persistent L2
+            # gap vs baseline). With this detach, Stage-6 trains ONLY the
+            # MHST/occ heads; the world model is shaped by planning (and
+            # depth) losses alone.
+            pb = pb.detach()
             mhst_mask = _align_osz_mask(osz_mask, (h, w), device, pb.dtype)
             # (design doc §3.3): col_attn keeps the CLEAN pred_bev — the
             # multi-hypothesis mixture no longer perturbs the shared BEV

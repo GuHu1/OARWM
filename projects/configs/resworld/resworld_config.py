@@ -28,12 +28,14 @@ use_osz_midas = True
 use_osz_rcsample = False
 assert not (use_osz_midas and use_osz_rcsample), \
     'use_osz_midas and use_osz_rcsample are mutually exclusive'
-# Drivable-area constraint for the ONLINE mask: the dataset loads the
-# HD-map drivable_mask from the offline {token}.npz (OSZ export) and the
-# online geometry intersects with it. OFF until data/osz is exported with
-# --use_drivable — otherwise samples mix constrained/unconstrained masks
-# (data conflict during the export window). See ISSUE.md P1-3.
-use_osz_drivable = False
+# Drivable-area constraint, now applied on BOTH mask paths (P1-3):
+#   (a) offline midas path — the dataset intersects the npz mask with its
+#       ``drivable_mask`` channel (identity if the npz was exported
+#       without --use_drivable, so this switch is always safe);
+#   (b) online rcsample path — the dataset loads the drivable mask and the
+#       online geometry intersects with it.
+# Off-road shadows must not gate on-road planning.
+use_osz_drivable = True
 # Injection gate for the head: True iff any mask source is active.
 use_osz = use_osz_midas or use_osz_rcsample
 
