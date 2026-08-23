@@ -256,9 +256,21 @@ class ResWorld(BEVDepth4D):
         # explicitly and via **kwargs would raise TypeError. Keep the batch
         # dim (1, 3, H, W) — the head's osz_fusion indexes mask[:, :1] and
         # broadcasts against (bs, C, H, W).
+        # Normalise the mask because its container differs between branches:
+        #  * TRAIN: collate stacks the numpy (3,200,200) masks into a
+        #    (B,3,200,200) torch tensor.
+        #  * TEST: MultiScaleFlipAug3D wraps every non-img_metas key into a
+        #    Python list (one entry per flip branch, flip=False -> [arr]), so
+        #    osz_mask arrives as `[ndarray]` — a list that crashes
+        #    `_align_osz_mask` (`.dim()`). Unpack it back to a
+        #    (1,3,200,200) tensor here (single-sample test, bs=1).
         osz_mask = kwargs.pop('osz_mask', None)
         if osz_mask is not None:
-            osz_mask = osz_mask[:1]
+            if isinstance(osz_mask, (list, tuple)):
+                osz_mask = osz_mask[0]     # flip-aug [arr] (single branch)
+            if not isinstance(osz_mask, torch.Tensor):
+                osz_mask = torch.as_tensor(osz_mask)   # ndarray -> tensor
+            osz_mask = osz_mask[:1]        # (1, 3, H, W)
 
         bbox_results = self.simple_test(
             img_metas=img_metas[0],
