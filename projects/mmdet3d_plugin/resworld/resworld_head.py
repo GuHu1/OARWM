@@ -344,6 +344,10 @@ class ResWorldHead(BaseModule):
                  # Injection gate: True iff any mask source is active
                  # (config: use_osz = use_osz_midas or use_osz_rcsample).
                  use_osz=False,
+                 # Stage-2 residual offset gate (2026-08-24): when False the
+                 # masks still feed MHST/risk/Stage-6 but the shared BEV
+                 # consumed by the planner stays baseline-clean.
+                 use_osz_inject=True,
                  # Stage-3 OARWM switch: multi-hypothesis transition head
                  # (see OARWM_ResWorld.md Stage 3).
                  use_oarwm=False,
@@ -424,6 +428,7 @@ class ResWorldHead(BaseModule):
         # created at all: strictly baseline (zero extra params, and no
         # DDP 'unused parameter' failure under find_unused_parameters=False).
         self.use_osz = use_osz
+        self.use_osz_inject = use_osz_inject
         # Stage-3 OARWM switch: same rationale — the MHST head is only
         # created when active, so the strict baseline has zero extra params
         # and no DDP unused-parameter failure.
@@ -544,7 +549,7 @@ class ResWorldHead(BaseModule):
         bev_embed_single = bev_embed.clone()
         bev_embed = bev_embed.permute(0, 2, 1).view(self.num_frames, bs, c, h, w).permute(1, 0, 2, 3, 4)
         bev_embed = self.bev_fusion_conv(bev_embed.reshape(bs, self.num_frames * c, h, w))
-        if self.use_osz and osz_mask is not None:
+        if self.use_osz and self.use_osz_inject and osz_mask is not None:
             # Stage-2 occlusion-aware injection (OARWM). Mask channels are
             # (osz_eye, osz_ground, semi). All-zeros = identity.
             m = _align_osz_mask(osz_mask, (h, w), device, dtype)

@@ -38,6 +38,15 @@ assert not (use_osz_midas and use_osz_rcsample), \
 use_osz_drivable = True
 # Injection gate for the head: True iff any mask source is active.
 use_osz = use_osz_midas or use_osz_rcsample
+# Stage-2 injection gate (2026-08-24 decisive negative result): the
+# residual occlusion offset B~ = B + E_occ*M is the ONLY remaining active
+# perturbation on the planning path — MHST/risk/Stage-6 are all detached
+# or ~1e-4 in the 08-24 log, and the 08-23 (occ_frac 0.67) vs 08-24
+# (occ_frac 0.13) runs produced the SAME L2 ~0.34. The injection therefore
+# is the prime suspect for the +13% L2 gap vs baseline 0.30.
+# False = masks still feed MHST/risk/Stage-6, but the shared BEV consumed
+# by the planner stays baseline-clean (the V2 "no back-flow" contract).
+use_osz_inject = False
 
 # --- Stage-3 OARWM switch (multi-hypothesis stochastic transition, MHST) ---
 # True = graft the MHST head on pred_bev (OARWM_ResWorld.md
@@ -237,6 +246,7 @@ model = dict(
         ego_lcf_feat_idx=None,
         valid_fut_ts=6,
         use_osz=use_osz,  # injection gate (offline or online source)
+        use_osz_inject=use_osz_inject,  # Stage-2 residual offset on shared BEV
         use_oarwm=use_oarwm,  # Stage-3 MHST head (plan B)
         mhst_k=mhst_k,
         mhst_sigma_min=mhst_sigma_min,
