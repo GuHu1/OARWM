@@ -1203,26 +1203,38 @@ class ResWorldHead(BaseModule):
             # the [DIAG] line (R_safe calibration fuel).
             self._diag_col_n = int((c_gt > 0.5).float().sum().item())
             # R_safe calibration (design doc Stage 5): EMA over the
-            # collision-positive mu quantile. Calibration STARTS at the
-            # first batch containing a collision-positive cell —
-            # batches without positives are skipped entirely (there is
-            # no quantile to calibrate against, and pulling the
-            # threshold down on empty batches would keep the guard
-            # permanently active). The EMA therefore advances one step
-            # per POSITIVE batch: with EMA 0.999 its half-life is
-            # ~693 positive batches, so the calibration speed is set by
-            # the collision density, not by wall-clock iters. The
-            # quantile is all_reduce'ed so every DDP rank's buffer
-            # stays identical.
+            # collision-positive mu quantile. Steps without ANY positive
+            # (across ranks) advance nothing — there is no quantile to
+            # calibrate against, and pulling the threshold down on empty
+            # steps would keep the guard permanently active. With EMA
+            # 0.999 the half-life is ~693 positive steps, so the
+            # calibration speed is set by the collision density, not by
+            # wall-clock iters.
             if self.risk_plan_mode == 'absolute_hinge':
+                # DDP contract: every rank must reach the collective
+                # UNCONDITIONALLY — gating the all_reduce on this rank's
+                # batch having positives desynchronises the per-rank
+                # collective sequences and deadlocks NCCL (collisions are
+                # sparse and batches are sampled independently per rank,
+                # so on the same step some ranks have positives while
+                # others do not). Each rank therefore contributes
+                # (quantile, 1) when it has positives and (0, 0) when it
+                # has none; ONE always-executed all_reduce aggregates
+                # both, and the mean over the positive ranks keeps every
+                # rank's buffer identical.
                 pos_cells = mu.detach()[c_gt > 0.5]
+                local = torch.zeros(2, device=mu.device, dtype=mu.dtype)
                 if pos_cells.numel() > 0:
-                    q = torch.quantile(
+                    local[0] = torch.quantile(
                         pos_cells, self.risk_safe_quantile)
-                    if torch.distributed.is_available() \
-                            and torch.distributed.is_initialized():
-                        torch.distributed.all_reduce(q)
-                        q = q / torch.distributed.get_world_size()
+                    local[1] = 1.0
+                if torch.distributed.is_available() \
+                        and torch.distributed.is_initialized():
+                    torch.distributed.all_reduce(local)
+                if local[1].item() > 0:
+                    # Mean quantile over the ranks with positives this
+                    # step (single-GPU: the local value itself).
+                    q = local[0] / local[1]
                     # In-place update: assigning would drop the
                     # register_buffer binding (state_dict / .to()).
                     self.risk_safe.mul_(self.risk_safe_ema).add_(

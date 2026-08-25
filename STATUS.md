@@ -64,9 +64,11 @@ use_risk_plan = True
 risk_plan_mode = 'absolute_hinge'   # 主配置；'gt_relative'（沿程相对项）为回退臂
 loss_plan_guard_weight = 0.1        # L_plan_guard 权重（λ_g）
 risk_safe_quantile = 0.1            # R_safe 标定分位数（碰撞格 μ 的 0.1 分位）
-risk_safe_ema = 0.999               # R_safe EMA 系数（按"正例 batch"计步：
-                                    # 首次出现碰撞正例才开始更新，无正例 batch 跳过；
-                                    # 半衰期 ≈693 个正例 batch，收敛速度由碰撞密度决定）
+risk_safe_ema = 0.999               # R_safe EMA 系数（按含正例的 step 计步：无正例
+                                    # step 不推进；每步一次无条件 all_reduce（正例
+                                    # 分位数 + 有效标志打包聚合，保证各 rank 集合通信
+                                    # 序列对称）；半衰期 ≈693 个正例 step，收敛速度由
+                                    # 碰撞密度决定）
 risk_plan_margin = 1.0              # 仅 gt_relative 模式使用
 loss_plan_cvar_weight = 0.0         # CVaR 尾部项（消融臂，默认关）
 cvar_beta = 0.25                    # CVaR 尾部比例

@@ -116,16 +116,18 @@ loss_plan_risk_weight = 0.1      # gt_relative arm only
 loss_plan_cvar_weight = 0.0      # CVaR tail term (ablation, default OFF)
 cvar_beta = 0.25                 # CVaR tail fraction of the trajectory steps
 # R_safe calibration (absolute_hinge): quantile of mu over collision
-# positive cells, EMA'ed. The EMA STARTS at the first batch that contains
-# at least one collision-positive cell — batches without positives are
-# skipped (there is no quantile to calibrate against). Half-life of
-# EMA 0.999 is ln2/ln(1/0.999) ≈ 693 POSITIVE batches; with sparse
+# positive cells, EMA'ed. Steps without positives on ANY rank advance
+# nothing (there is no quantile to calibrate against). Half-life of
+# EMA 0.999 is ln2/ln(1/0.999) ≈ 693 positive steps; with sparse
 # collisions this is the dominant convergence time. If [DIAG] risk_safe
 # stays pinned at 1.0 while loss_col settles, the positive density is too
 # low — raise the update step (e.g. risk_safe_ema=0.99) or accept a
-# dormant guard. The buffer is all_reduce'ed across ranks and in-place
-# updated (register_buffer binding). Init 1.0 = guard dormant until
-# calibrated (R_worst <= risk_max = 1.0).
+# dormant guard. The buffer is aggregated by ONE always-executed
+# all_reduce per step (per-rank positive quantiles packed with a valid
+# flag, so every rank reaches the collective unconditionally —
+# conditionally executed collectives desynchronise the ranks and
+# deadlock NCCL) and updated in place (register_buffer binding).
+# Init 1.0 = guard dormant until calibrated (R_worst <= risk_max = 1.0).
 risk_safe_quantile = 0.1
 risk_safe_ema = 0.999
 # GT-risk upper-bound margin (gt_relative mode only): max(0, R(pred) -
