@@ -288,7 +288,7 @@ class RiskHead(nn.Module):
         r_exp = mu.clamp(min=0.0, max=self.risk_max)
         r_worst = (mu + self.beta * sigma_epis).clamp(
             min=0.0, max=self.risk_max)
-        field = torch.stack([r_exp, r_worst], dim=1)   # (B, 2, H, W)
+        field = torch.cat([r_exp, r_worst], dim=1)     # (B, 2, H, W)
         return field, {'mu': mu, 'sigma_epis': sigma_epis}
 
     def _smooth(self, t):
