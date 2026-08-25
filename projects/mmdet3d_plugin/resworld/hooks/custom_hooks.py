@@ -25,7 +25,7 @@ class CustomSetEpochInfoHook(Hook):
         model.set_epoch(epoch)
 
     def before_train_iter(self, runner):
-        """Inject the runner iter count into the head (V2 gate warmup).
+        """Inject the runner iter count into the head (gate warmup).
 
         The head's ``iter`` attribute drives the risk-gated injection
         warmup (``gate_warmup_iters``, design doc Stage 2): before_train_iter

@@ -33,15 +33,15 @@ nuScenes 开环评测的非对称结果：
 新:  遮挡 ──► 风险 ──► BEV        （先赋予安全语义，再以受控带宽写回表征）
 ```
 
-### 1.4 逐阶段变更
+### 1.4 逐阶段变更（旧设计 → 新设计；新设计已全部实现并合入主配置）
 
-| 位置 | 旧（代码现状） | 新 |
+| 位置 | 旧设计（已替换） | 新设计（当前代码） |
 |---|---|---|
-| Stage 2 | 自由加性注入（config `use_osz_inject`，现为 False） | 风险门控回流 `B̃ = B + g⊙Proj([R_exp.detach(), R_worst.detach()])`，三态 `osz_inject_mode ∈ {off, raw_additive, risk_gated}` |
-| Stage 3 | MHST 已实现（`OcclusionMHSTHead` L215） | **不变** + 语义锚定头（§3.4 演进） |
-| Stage 4 | 计算式风险场（`build_risk_field` L135，超参 `risk_beta/risk_w_sigma/risk_gamma`） | 可学习 RiskHead（μ + σ_epis UCB），超参读数层化 |
-| Stage 5 | 三件套相对项（`loss_plan_risk/cvar/info_weight`） | 绝对阈值下界 `L_plan_guard`，`risk_plan_mode='absolute_hinge'`；info 移除、CVaR 进消融 |
-| Stage 6 | 六项损失（`loss_*_weight` 均已在 config） | 新增 `L_col`/`L_dyn`/`‖g‖₁` 三项 |
+| Stage 2 | 自由加性注入 `B̃ = B + E_occ ⊙ M`（键 `use_osz_inject` 已删除） | 风险门控回流 `B̃ = B + g⊙Proj([R_exp.detach(), R_worst.detach()])`，三态 `osz_inject_mode ∈ {off, raw_additive, risk_gated}`（主配置 risk_gated） |
+| Stage 3 | MHST（`OcclusionMHSTHead`） | **不变** + 语义锚定头为后续演进（设计文档 §3.4） |
+| Stage 4 | 计算式风险场（`build_risk_field` 已删除；超参 `risk_w_sigma`/`risk_gamma` 已删除） | 可学习 `RiskHead`（μ=sigmoid + σ_epis UCB，MC-dropout），`risk_beta` 语义改为概率量纲 UCB 系数 |
+| Stage 5 | 三件套相对项（`loss_plan_risk/cvar/info`） | 绝对阈值下界 `L_plan_guard`，`risk_plan_mode='absolute_hinge'`（主配置）；info 已删除、CVaR 仅作消融臂 |
+| Stage 6 | 六项损失 | 增加 `L_col`/`L_dyn`/`‖g‖₁` 三项；`L_occ_gt` 目标为动态占用 `occ_dyn` |
 
 ### 1.5 已否证的假设（决策记录，勿再回退）
 
@@ -83,13 +83,13 @@ nuScenes 开环评测的非对称结果：
 
 ## 3. 落地顺序与分层回退
 
-### 3.1 落地顺序
+### 3.1 落地顺序（步骤 1–4 代码均已实现，训练验证进行中）
 
-1. 升级 `_rasterise_boxes_bev` → 产出 `S_dyn`（沿朝向 forward margin，默认 2 m）与接近度特征 `1/(1+d)`；
-2. 实现 RiskHead（先 `mc_dropout` 跑通），接 L_col/L_dyn，此时 `osz_inject_mode='off'`、`risk_plan_mode='gt_relative'`——**中间检查点：μ 热力图必须落在动态物前向区域与遮挡出口上**；若仍落在"MHST 预测发散处"，说明安全监督未生效，不得进入下步；
-3. 切 `risk_plan_mode='absolute_hinge'`，接 EMA 标定 R_safe，确认 CR 不劣化、guard 激活率 ≪ 1；
-4. 开 `osz_inject_mode='risk_gated'`，监控 ‖g‖₁ 曲线（warmup 后应离开 0；恒 0 则回步骤 2）；
-5. 全消融。
+1. ✅ `_rasterise_dynamic` 已产出 `S_dyn`（沿朝向 forward margin，默认 2 m）、`occ_dyn` 与接近度特征 `1/(1+d)`；
+2. ✅ `RiskHead`（mc_dropout）已实现并接 L_col/L_dyn——**中间检查点（待训练确认）：μ 热力图必须落在动态物前向区域与遮挡出口上**；若仍落在"MHST 预测发散处"，说明安全监督未生效，不得开启注入；
+3. ✅ `risk_plan_mode='absolute_hinge'` 已为主配置，EMA 标定 R_safe 已实现——待训练确认 CR 不劣化、guard 激活率 ≪ 1；
+4. ✅ `osz_inject_mode='risk_gated'` 已为主配置——待训练监控 ‖g‖₁ 曲线（warmup 后应离开 0；恒 0 则回步骤 2 查监督）；
+5. ⬜ 全消融（训练验证通过后执行）。
 
 ### 3.2 分层回退
 

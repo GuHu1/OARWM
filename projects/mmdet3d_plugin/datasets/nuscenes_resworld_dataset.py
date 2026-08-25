@@ -50,7 +50,7 @@ def _load_osz_mask(osz_dir: Optional[str], token: str,
 
     ``use_drivable``: intersect all three channels with the npz's
     ``drivable_mask`` channel — off-road shadows must not gate on-road
-    planning (ISSUE.md P1-3). Identity when the channel is missing
+    planning. Identity when the channel is missing
     (npz exported without ``--use_drivable`` stores an all-True mask).
     """
     if osz_dir:
@@ -98,7 +98,7 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
         # Stage-2 OSZ, online source: the model computes masks from its own
         # RCSample depth; the dataset optionally supplies the HD-map
         # drivable mask (from the offline npz) so the online mask stays
-        # inside the drivable area (ISSUE.md P1-3). OFF until the npz export
+        # inside the drivable area. OFF until the npz export
         # finishes, to avoid mixed constrained/unconstrained samples.
         self.use_osz_rcsample = kwargs.pop('use_osz_rcsample', False)
         self.use_osz_drivable = kwargs.pop('use_osz_drivable', False)
@@ -168,7 +168,7 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
                 self.osz_dir, info['token'],
                 use_drivable=self.use_osz_drivable).copy()
         if (self.use_osz or self.use_osz_rcsample) and self.use_osz_drivable:
-            # Raw HD-map drivable mask as an INDEPENDENT key (V2): the
+            # Raw HD-map drivable mask as an INDEPENDENT key: the
             # RiskHead consumes it as a dedicated input channel (design doc
             # Stage 4) while the mask itself may already be intersected into
             # osz_mask above. Same .copy() rationale.

@@ -16,30 +16,30 @@ _base_ = [
 #                    RCSample depth (already computed by the view
 #                    transformer) produces the mask inside the train/test
 #                    loop (GPU OSZ geometry adds tens of ms/step).
-# 2026-08-18: switched to the offline MiDaS masks (route A). MiDaS +
-# LiDAR-aligned masks are stable; online stays the deployment form.
-# Requires data/osz fully exported with --use_drivable BEFORE training
-# (missing npz falls back to all-zeros = unconstrained samples).
+# MiDaS + LiDAR-aligned masks are the stable training source; online is
+# the deployment form. Requires data/osz fully exported with
+# --use_drivable BEFORE training (missing npz falls back to all-zeros =
+# unconstrained samples).
 use_osz_midas = True
 use_osz_rcsample = False
 assert not (use_osz_midas and use_osz_rcsample), \
     'use_osz_midas and use_osz_rcsample are mutually exclusive'
 # Drivable-area constraint: (a) the offline midas path intersects the npz
 # mask with its ``drivable_mask`` channel; (b) BOTH paths also hand the
-# raw ``drivable_mask`` channel to the head as a RiskHead input (V2).
+# raw ``drivable_mask`` channel to the head as a RiskHead input.
 # Off-road shadows must not gate on-road planning.
 use_osz_drivable = True
 # Injection gate for the head: True iff any mask source is active.
 use_osz = use_osz_midas or use_osz_rcsample
 
-# --- Stage-2 injection (V2 three-state) ---
+# --- Stage-2 injection (three-state) ---
 # 'off'          : no injection — planner BEV stays baseline-clean
 #                  (strict baseline / "w/o risk injection" ablation 5.2).
-# 'raw_additive' : legacy V1 residual offset B~ = B + E_occ*M (ablation
-#                  arm; the decisive 2026-08-24 negative result suspected
-#                  this unsupervised perturbation for the +13% L2 gap —
-#                  it must never be the main configuration again).
-# 'risk_gated'   : risk-gated back-flow (V2, main configuration)
+# 'raw_additive' : unsupervised residual offset B~ = B + E_occ*M (ablation
+#                  arm — a free-form perturbation of the planner features,
+#                  kept only to quantify the effect of injecting occlusion
+#                  evidence without safety supervision).
+# 'risk_gated'   : risk-gated back-flow (main configuration)
 #                  B~ = B + g ⊙ Proj([R_exp.detach(), R_worst.detach()])
 #                  — the CONTENT is the safety-supervised RiskHead reading
 #                  (detached, ISSUE I2) and the BANDWIDTH is the
@@ -66,28 +66,28 @@ loss_gate_weight = 1e-5
 use_oarwm = True
 mhst_k = 5            # hypotheses K (ablation 5.2-2: 1 / 3 / 5 / 10)
 mhst_sigma_min = 0.1  # occluded-cell uncertainty lower bound Σ_min
-# P0-6 hard bounds (2026-08): zombie-hypothesis explosion guard. A
-# hypothesis whose posterior collapses to ~0 loses its exposure-supervision
-# gradient and its dB drifts upward freely; the caps keep var/dB bounded.
+# Hard bounds (zombie-hypothesis guard): a hypothesis whose posterior
+# collapses to ~0 loses its exposure-supervision gradient and its dB
+# would drift freely; the caps keep var/dB bounded.
 mhst_delta_clamp = 10.0   # per-element cap on dB^(k)
 mhst_sigma_max = 10.0     # sigma upper bound (also caps the e2 target)
 assert (not use_oarwm) or use_osz, \
     'use_oarwm (Stage 3 MHST) requires a mask source: ' \
     'set use_osz_midas or use_osz_rcsample'
 
-# --- Stage-4 learnable RiskHead (V2, MC-dropout UCB) ---
+# --- Stage-4 learnable RiskHead (MC-dropout UCB) ---
 use_risk_field = True      # False = no RiskHead (pure MHST forward)
 risk_hidden = 64           # conv hidden channels
 risk_dropout = 0.1         # MC-dropout rate on the last two layers
 risk_mc_t = 4              # MC forwards (mu = mean, sigma_epis = std)
 risk_mc_eval = False       # True = MC also at eval (T stochastic forwards);
                            # False = single point estimate at eval
-# UCB coefficient β — PROBABILITY-scale semantics (V2 RiskHead): sigma_epis
-# is the std of the sigmoid outputs, bounded by 0.5 (std of a Bernoulli),
-# typically 0.05-0.2 in practice. beta=1 therefore lifts R_worst by at most
+# UCB coefficient β — PROBABILITY-scale semantics: sigma_epis is the std
+# of the sigmoid outputs, bounded by 0.5 (std of a Bernoulli), typically
+# 0.05-0.2 in practice. beta=1 therefore lifts R_worst by at most
 # ~0.2-0.5 over mu; beta=2 already saturates against risk_max=1.0 whenever
-# mu > 1 - 2*sigma_epis, and beta > 2 is meaningless. Do NOT reuse the old
-# (clamp-100 field) intuition here. Sweep {0.5, 1, 2} = {0.5σ, 1σ, 2σ} UCB.
+# mu > 1 - 2*sigma_epis, and beta > 2 is meaningless.
+# Sweep {0.5, 1, 2} = {0.5σ, 1σ, 2σ} UCB.
 risk_beta = 1.0            # 1σ UCB upper bound (default)
 risk_max = 1.0             # R_exp / R_worst clamp upper bound (probability
                            # semantics: mu = sigmoid(logit), BCE-compatible)
@@ -98,7 +98,7 @@ risk_cmd_proj = 8          # cmd-embedding projection channels (shared
 assert (not use_risk_field) or use_oarwm, \
     'use_risk_field (Stage 4 RiskHead) requires use_oarwm (Stage 3)'
 
-# --- Stage-5 risk-weighted planning (V2) ---
+# --- Stage-5 risk-weighted planning ---
 use_risk_plan = True
 # 'absolute_hinge' (main, design doc Stage 5): L_plan_guard = mean_t
 #   max(0, R_worst(tau_t) - R_safe); R_safe = EMA_0.999[quantile_0.1(
@@ -106,7 +106,7 @@ use_risk_plan = True
 #   scale; risk avoidance itself lives in the feature layer (Stage-2
 #   injection). The field is sampled DETACHED (ISSUE I2): the planner
 #   only learns to AVOID risk via the sampling-coordinate branch.
-# 'gt_relative' (V1 fallback arm, ISSUE 3.1 intermediate checkpoint):
+# 'gt_relative' (ablation arm):
 #   along-path risk upper-bounded by the GT trajectory (+ CVaR term).
 risk_plan_mode = 'absolute_hinge'
 assert risk_plan_mode in ('absolute_hinge', 'gt_relative'), \
@@ -139,13 +139,13 @@ loss_div_weight = 0.1            # hypothesis diversity (ΔB pairwise)
 loss_occ_halluc_weight = 1.0     # exposure mixture likelihood
 loss_uncertainty_weight = 1.0    # σ calibration
 loss_occ_gt_weight = 1.0         # occluded-cell dynamic-occupancy BCE
-                                 # (s_occ vs S_gt, V2: dynamic boxes only)
+                                 # (s_occ vs S_gt, dynamic boxes only)
 loss_occ_gt_pos_weight = 5.0     # BCE pos_weight (penalise missed occupancies)
 # risk-field grounding (design doc §6.2c): anchors the raw risk
 # intensity (sigma-weighted ||dB||) to the exposure error e2 — zero extra
 # data; makes phi an unbiased "future content change" estimate.
 loss_risk_ground_weight = 0.1    # 0 disables the term
-# Stage-4 safety supervision (V2): trains the RiskHead ONLY (ISSUE I4).
+# Stage-4 safety supervision: trains the RiskHead ONLY (ISSUE I4).
 loss_col_weight = 1.0            # collision hard-anchor BCE (mu vs C_gt)
 loss_col_pos_weight = 10.0       # pos_weight (collision cells are rare)
 loss_dyn_weight = 1.0            # dynamic-occupancy BCE (mu vs S_dyn)
@@ -258,10 +258,9 @@ model = dict(
         ins_channels=[512],
         out_channels=numC_Trans,
         depthnet_cfg=dict(use_dcn=False, aspp_mid_channels=96),
-        # P1-3 closed (2026-08-18): mask source moved to the offline MiDaS
-        # npz (use_osz_midas=True), so the online mask no longer depends on
-        # this depth head. Back to the baseline weight 0.1 — at 0.3 the
-        # depth loss was ~0.7, the single largest term of total loss ~2.2.
+        # The offline MiDaS npz is the mask source, so the online mask
+        # does not depend on this depth head; 0.1 keeps the depth loss a
+        # small share of the total.
         loss_depth_weight=[0.1],
         downsamples=[16]),
     img_bev_encoder_backbone=dict(
@@ -289,14 +288,14 @@ model = dict(
         ego_lcf_feat_idx=None,
         valid_fut_ts=6,
         use_osz=use_osz,  # mask gate (offline or online source)
-        osz_inject_mode=osz_inject_mode,  # V2 three-state injection
+        osz_inject_mode=osz_inject_mode,  # three-state injection
         gate_warmup_iters=gate_warmup_iters,  # gate frozen period (iters)
         loss_gate_weight=loss_gate_weight,  # L1 bandwidth budget on g
         use_oarwm=use_oarwm,  # Stage-3 MHST head
         mhst_k=mhst_k,
         mhst_sigma_min=mhst_sigma_min,
-        mhst_delta_clamp=mhst_delta_clamp,  # P0-6 bound
-        mhst_sigma_max=mhst_sigma_max,      # P0-6 bound
+        mhst_delta_clamp=mhst_delta_clamp,  # hard bound on dB^(k)
+        mhst_sigma_max=mhst_sigma_max,      # hard bound on sigma
         use_risk_field=use_risk_field,  # Stage-4 learnable RiskHead
         risk_hidden=risk_hidden,
         risk_dropout=risk_dropout,
@@ -313,9 +312,9 @@ model = dict(
         loss_occ_gt_weight=loss_occ_gt_weight,
         loss_occ_gt_pos_weight=loss_occ_gt_pos_weight,
         loss_risk_ground_weight=loss_risk_ground_weight,  # grounding
-        loss_col_weight=loss_col_weight,   # V2 collision anchor
+        loss_col_weight=loss_col_weight,   # collision hard-anchor BCE
         loss_col_pos_weight=loss_col_pos_weight,
-        loss_dyn_weight=loss_dyn_weight,   # V2 dynamic-occupancy BCE
+        loss_dyn_weight=loss_dyn_weight,   # dynamic-occupancy BCE
         loss_dyn_pos_weight=loss_dyn_pos_weight,
         dyn_forward_margin=dyn_forward_margin,  # S_dyn heading margin (m)
         dyn_vel_thresh=dyn_vel_thresh,          # dynamic velocity threshold
@@ -327,11 +326,12 @@ model = dict(
         cvar_beta=cvar_beta,
         risk_safe_quantile=risk_safe_quantile,  # R_safe calibration quantile
         risk_safe_ema=risk_safe_ema,            # R_safe EMA coefficient
-        risk_plan_warmup_epochs=2,  # risk terms off for epochs 0-1 (P0-1/P1-2)
-        # Linear ramp of risk weights after warmup (0 -> 1 over N epochs):
-        # the hard switch made loss_plan_reg spike 0.53 -> 1.24 at the
-        # activation epoch (2026-08-13/14 log); the ramp lets reg settle
-        # smoothly (expected final: reg slightly above init, ~5%).
+        risk_plan_warmup_epochs=2,  # risk terms off for epochs 0-1 (the
+                                    # risk head needs its safety supervision
+                                    # before steering the planner)
+        # Linear ramp of the risk weights after warmup (0 -> 1 over N
+        # epochs): a hard 0->1 switch would spike loss_plan_reg at the
+        # activation epoch; the ramp lets reg settle smoothly.
         risk_plan_ramp_epochs=2,
         # GT-risk upper-bound margin (gt_relative mode only).
         risk_plan_margin=risk_plan_margin,

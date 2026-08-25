@@ -252,8 +252,6 @@ class ResWorld(BEVDepth4D):
         gt_attr_labels=None,
         **kwargs
     ):
-        # img_metas[0][0]['can_bus'][-1] = 0
-        # img_metas[0][0]['can_bus'][:3] = 0
         kwargs['can_bus'] = kwargs['can_bus'][0]
         # Pop osz_mask before **kwargs expansion: the key is carried by the
         # test data when use_osz=True (Collect3D), so passing it both
@@ -275,7 +273,7 @@ class ResWorld(BEVDepth4D):
             if not isinstance(osz_mask, torch.Tensor):
                 osz_mask = torch.as_tensor(osz_mask)   # ndarray -> tensor
             osz_mask = osz_mask[:1]        # (1, 3, H, W)
-        # Same list-wrapping as osz_mask (MultiScaleFlipAug3D); the V2
+        # Same list-wrapping as osz_mask (MultiScaleFlipAug3D); the
         # RiskHead consumes the raw drivable channel at test time too.
         # May be None (npz without the drivable_mask channel).
         drivable_mask = kwargs.pop('drivable_mask', None)
@@ -450,19 +448,13 @@ class ResWorld(BEVDepth4D):
             'plan_obj_box_col_1s':0,
             'plan_obj_box_col_2s':0,
             'plan_obj_box_col_3s':0,
-            # 'plan_obj_col_plus_1s':0,
-            # 'plan_obj_col_plus_2s':0,
-            # 'plan_obj_col_plus_3s':0,
-            # 'plan_obj_box_col_plus_1s':0,
-            # 'plan_obj_box_col_plus_2s':0,
-            # 'plan_obj_box_col_plus_3s':0,
         }
         metric_dict['fut_valid_flag'] = fut_valid_flag
         future_second = 3
         assert pred_ego_fut_trajs.shape[0] == 1, 'only support bs=1'
         if self.planning_metric is None:
             self.planning_metric = PlanningMetric()
-        segmentation, pedestrian, segmentation_plus = self.planning_metric.get_label(
+        segmentation, pedestrian, _ = self.planning_metric.get_label(
             gt_agent_boxes, gt_agent_feats, gt_map_boxes, gt_map_labels)
         occupancy = torch.logical_or(segmentation, pedestrian)
 
@@ -481,10 +473,6 @@ class ResWorld(BEVDepth4D):
                     pred_ego_fut_trajs[:, :cur_time].detach(),
                     gt_ego_fut_trajs[:, :cur_time],
                     occupancy)
-                # obj_coll_plus, obj_box_coll_plus = self.planning_metric.evaluate_coll(
-                #     pred_ego_fut_trajs[:, :cur_time].detach(),
-                #     gt_ego_fut_trajs[:, :cur_time],
-                #     segmentation_plus)
                 metric_dict['plan_L2_{}s'.format(i+1)] = traj_L2
                 metric_dict['plan_obj_col_{}s'.format(i + 1)] = obj_coll.mean().item()
                 metric_dict['plan_obj_box_col_{}s'.format(i + 1)] = obj_box_coll.mean().item()

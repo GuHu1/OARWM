@@ -1,6 +1,5 @@
 # OARWM-Res 项目状态
 
-> 最后更新：2026-08（V2：风险门控注入 + 可学习 RiskHead + 绝对阈值安全下界）
 > 设计文档：`OARWM_ResWorld.md` · 工程修订与不变量：`ISSUE.md` · 安装/数据准备：`INSTALL.md`
 > 服务器：8×RTX 3090，`resworld` 环境（python 3.8 + torch 1.9.1+cu111 + mmcv-full 1.4.0 + mmdet3d 0.17.1）
 
@@ -11,11 +10,11 @@
 | Stage | 改造内容 | 关键文件 | 开关 |
 |---|---|---|---|
 | **1 图像/BEV** | 继承 ResWorld（ResNet-50 + RCSample + BEV encoder），未改动 | — | — |
-| **2 显式遮挡几何** | OSZ 高度感知射线投射生成遮挡掩码（不变）；**三态注入**：`risk_gated`（风险门控回流 `B̃ = B + g⊙Proj([R_exp.detach(), R_worst.detach()])`，g 零初始化 + tanh 上界 + warmup 冻结 + L1 预算，Proj 常规增益）/ `raw_additive`（V1 加性残差，消融臂）/ `off`（等价基线） | `OSZ/`、`resworld_head.py::OcclusionAwareFusion`、`nuscenes_resworld_dataset.py` | `use_osz_midas`/`use_osz_rcsample`（掩码源互斥）、`osz_inject_mode`、`gate_warmup_iters`、`loss_gate_weight` |
-| **3 多假设 MHST** | 遮挡区 K 假设残差转移（不变）：先验网络（多尺度膨胀邻域）+ K expert 分支（零初始化）+ σ 不确定性 + P0-6 硬限幅；**col_attn 消费干净 `pred_bev`**，混合分布不回流；occ_head 随 `use_oarwm` 创建（RiskHead 的 s_occ 输入） | `resworld_head.py::OcclusionMHSTHead` | `use_oarwm`、`mhst_k=5`、`mhst_sigma_min=0.1`、`mhst_delta_clamp`、`mhst_sigma_max` |
+| **2 显式遮挡几何** | OSZ 高度感知射线投射生成遮挡掩码；**三态注入**：`risk_gated`（风险门控回流 `B̃ = B + g⊙Proj([R_exp.detach(), R_worst.detach()])`，g 零初始化 + tanh 上界 + warmup 冻结 + L1 预算，Proj 常规增益）/ `raw_additive`（无监督加性残差，消融臂）/ `off`（等价基线） | `OSZ/`、`resworld_head.py::OcclusionAwareFusion`、`nuscenes_resworld_dataset.py` | `use_osz_midas`/`use_osz_rcsample`（掩码源互斥）、`osz_inject_mode`、`gate_warmup_iters`、`loss_gate_weight` |
+| **3 多假设 MHST** | 遮挡区 K 假设残差转移：先验网络（多尺度膨胀邻域）+ K expert 分支（零初始化）+ σ 不确定性 + 硬限幅（ΔB ±10 / σ≤10）；**col_attn 消费干净 `pred_bev`**，混合分布不回流；occ_head 随 `use_oarwm` 创建（RiskHead 的 s_occ 输入） | `resworld_head.py::OcclusionMHSTHead` | `use_oarwm`、`mhst_k=5`、`mhst_sigma_min=0.1`、`mhst_delta_clamp`、`mhst_sigma_max` |
 | **4 可学习 RiskHead** | 输入全 detach（`B_t`、`M`、`drivable`、`φ=σ/(1+σ)·‖ΔB‖`、`s_occ`、`1/(1+d)`、`cmd_embed`）；MC-dropout（末两层 dropout，T=4 前向）；输出 `μ`（sigmoid，BCE 兼容）+ `σ_epis`（dropout 方差）；双通道契约 `R_exp=clamp(μ,0,R_max)`、`R_worst=clamp(μ+β·σ_epis,0,R_max)`；高斯平滑（kernel=5, σ=1.0） | `resworld_head.py::RiskHead` | `use_risk_field`、`risk_hidden/dropout/mc_t`、`risk_beta`、`risk_max`、`risk_smooth_ks/sigma` |
-| **5 绝对阈值安全下界** | `L_plan_guard = (1/T)Σ_t max(0, R_worst(τ_t) − R_safe)`；`R_safe = EMA_0.999[quantile_0.1(μ \| 碰撞格)]`（buffer，batch 无碰撞正例不更新，DDP all_reduce 同步）；采样风险场输入 detach（规划只学规避、不塑形风险场）；`gt_relative`（V1 沿程相对 + CVaR 消融）保留作回退臂，info 项移除 | `resworld_head.py::loss` | `use_risk_plan`、`risk_plan_mode`、`loss_plan_guard_weight`、`risk_safe_quantile/ema`、`loss_plan_cvar_weight`（消融） |
-| **6 端到端损失** | 原有五项（`L_div`/`L_occ_halluc`/`L_uncertainty`/`L_occ_gt`/`L_risk_ground`）+ **新增三项**：`L_col`（碰撞占用 BCE，GT 未来足迹 ∩ 动态占用）、`L_dyn`（`S_dyn` = 动态占用栅格 + 沿朝向 forward margin 2 m 的 BCE）、`L_gate=λ·‖g‖₁`；`L_occ_gt` 目标升级为动态占用 `S_gt`（遮挡区 BCE，pos_weight=5） | `resworld_head.py::loss`、`_rasterise_dynamic`、`resworld.py::encode_next_bev`、`nuscenes_resworld_dataset.py`（`use_next`）、`loading.py` | 各 `loss_*_weight`（0=关）、`dyn_forward_margin`、`dyn_vel_thresh` |
+| **5 绝对阈值安全下界** | `L_plan_guard = (1/T)Σ_t max(0, R_worst(τ_t) − R_safe)`；`R_safe = EMA_0.999[quantile_0.1(μ \| 碰撞格)]`（buffer，batch 无碰撞正例不更新，DDP all_reduce 同步）；采样风险场输入 detach（规划只学规避、不塑形风险场）；`gt_relative`（沿程相对 + CVaR 消融）为回退臂 | `resworld_head.py::loss` | `use_risk_plan`、`risk_plan_mode`、`loss_plan_guard_weight`、`risk_safe_quantile/ema`、`loss_plan_cvar_weight`（消融） |
+| **6 端到端损失** | 八项：分布族五项（`L_div`/`L_occ_halluc`/`L_uncertainty`/`L_occ_gt`/`L_risk_ground`）+ 安全/门控三项（`L_col` 碰撞占用 BCE（GT 未来足迹 ∩ 动态占用）、`L_dyn` 动态占用 BCE（`S_dyn` = 栅格 + 沿朝向 forward margin 2 m）、`L_gate=λ·‖g‖₁`）；`L_occ_gt` 目标为动态占用 `S_gt`（遮挡区 BCE，pos_weight=5） | `resworld_head.py::loss`、`_rasterise_dynamic`、`resworld.py::encode_next_bev`、`nuscenes_resworld_dataset.py`（`use_next`）、`loading.py` | 各 `loss_*_weight`（0=关）、`dyn_forward_margin`、`dyn_vel_thresh` |
 
 **工程与基础**（贯穿各 Stage）：OSZ 网格对齐 ResWorld（200×200 各向异性，单一来源 `OSZ/config.py`）；`use_osz`/`use_oarwm` 条件实例化（开关关闭零参数，防 DDP 未使用参数）；next 帧独立监督通道（`gt_bev_next` 不进训练输入）；`risk_safe`/`gate` 等训练状态注册为 buffer/参数，DDP 同步；`CustomSetEpochInfoHook` 每 iter 前注入 `head.iter`（gate warmup 按 iter 计）；RCSample 深度估计器与训练管线严格对齐；`--depth-source {midas,rcsample,lidar}` 三臂；`--backend {numpy,torch,auto}` GPU 加速。
 
@@ -34,7 +33,7 @@ use_osz_drivable = True    # drivable 约束（离线路径 intersect 掩码；�
 use_osz = use_osz_midas or use_osz_rcsample   # head 注入/风险总闸
 
 # ---- Stage 2 注入（三态）----
-osz_inject_mode = 'risk_gated'  # 'off'（等价基线）/ 'raw_additive'（V1 消融臂）
+osz_inject_mode = 'risk_gated'  # 'off'（等价基线）/ 'raw_additive'（无监督加性残差消融臂）
                                 # / 'risk_gated'（风险门控回流，主配置）
 gate_warmup_iters = 2000        # g 冻结期（注入值恒 0，Proj 常规增益保梯度）
 loss_gate_weight = 1e-5         # ‖g‖₁ 带宽预算（g=tanh(gate_raw)，|g|≤1 自动成立）
@@ -62,7 +61,7 @@ risk_cmd_proj = 8          # cmd 嵌入投影通道（共享 navi_embedding，�
 
 # ---- Stage 5 风险规划 ----
 use_risk_plan = True
-risk_plan_mode = 'absolute_hinge'   # 主配置；'gt_relative'（V1 沿程相对项）为回退臂
+risk_plan_mode = 'absolute_hinge'   # 主配置；'gt_relative'（沿程相对项）为回退臂
 loss_plan_guard_weight = 0.1        # L_plan_guard 权重（λ_g）
 risk_safe_quantile = 0.1            # R_safe 标定分位数（碰撞格 μ 的 0.1 分位）
 risk_safe_ema = 0.999               # R_safe EMA 系数（按"正例 batch"计步：
@@ -113,7 +112,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash tools/dist_train.sh projects/configs/res
 要点：
 - `use_oarwm=False` 时 `OcclusionMHSTHead`/`occ_head` 不创建、`use_risk_field/plan=False` 时 `RiskHead` 不创建、风险损失不算——模型严格等价纯 ResWorld（无额外参数、无额外计算）；
 - `use_osz=False` 派生 `use_next=False`——数据管线不加载 next 帧（零开销），`loss_occ_halluc/uncertainty` 因无 `gt_bev_next` 自动跳过；
-- 恢复主配置：把开关区改回 §2.1 的值即可。
+- 主配置：把开关区设为 §2.1 的值即可。
 
 ### 2.2 训练命令
 
@@ -160,23 +159,23 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash tools/dist_test.sh projects/configs/resw
 
 ### 3.2 指标参考（UniAD/VAD 风格开环）
 
-以下为 V1 实现（改造前）的评测记录，作参照锚点；V2 训练完成后更新：
+以下为已完成的评测记录（按评测日期区分配置）；主配置训练完成后更新：
 
 **L2 (ADE):**
 
 | 配置 | L2 1s | L2 2s | L2 3s | L2 Avg | CR Avg |
 |---|---|---|---|---|---|
 | **ResWorld** | 0.142 | 0.271 | 0.486 | **0.300** | 0.17 |
-| OARWM V1(2026-08-23, offline MiDaS) | 0.166 | 0.312 | 0.542 | 0.340 | 8.3e-4 |
-| OARWM V2 | — | — | — | — | — |
+| OARWM (2026-08-23 评测, offline MiDaS) | 0.166 | 0.312 | 0.542 | 0.340 | 8.3e-4 |
+| OARWM (主配置, 待训) | — | — | — | — | — |
 
 **L2_stp3(终点 FDE):**
 
 | 配置 | stp3 Avg | CR Avg |
 |---|---|---|
 | **ResWorld** | **0.586** | **0.06** |
-| OARWM V1(2026-08-23, offline MiDaS) | 0.651 | 2.6e-3 |
-| OARWM V2 | — | — |
+| OARWM (2026-08-23 评测, offline MiDaS) | 0.651 | 2.6e-3 |
+| OARWM (主配置, 待训) | — | — |
 
 ### 3.3 可视化评估结果
 
@@ -241,10 +240,10 @@ python tools/analysis_tools/traj_behavior_stats.py \
 | 门控消融 | 带宽自调节（5.2 w/o 门控） | `loss_gate_weight=0`（无 L1 预算，g 由规划损失自由训练） | `abl_no_gate` |
 | β 扫描 | UCB 保守强度（5.2） | `risk_beta=0.5/1/2`（概率量纲：σ_epis≤0.5；2 已近 risk_max 饱和，>2 无意义） | `abl_beta{05,1,2}` |
 | w/o R_worst | 仅 R_exp（5.2） | `risk_beta=0`（UCB 关闭） | `abl_no_ucb` |
-| 规划模式 | absolute vs GT 相对（V2 回退臂） | `risk_plan_mode` | `abl_plan_{abs,gtrel}` |
+| 规划模式 | absolute vs GT 相对（回退臂） | `risk_plan_mode` | `abl_plan_{abs,gtrel}` |
 | 安全监督消融 | 逐项去监督（5.2） | `loss_col_weight=0` / `loss_dyn_weight=0` | `abl_no_col` / `abl_no_dyn` |
-| 阈值容差 | R_safe 标定分位（V2） | `risk_safe_quantile=0.1/0.5` | `abl_q01/q05` |
-| 锚定损失消融 | 风险场真实性锚定（V2） | `loss_risk_ground_weight=0` | `abl_no_ground` |
+| 阈值容差 | R_safe 标定分位 | `risk_safe_quantile=0.1/0.5` | `abl_q01/q05` |
+| 锚定损失消融 | 风险场真实性锚定 | `loss_risk_ground_weight=0` | `abl_no_ground` |
 | MC-dropout 消融 | σ_epis 实现（5.2） | `risk_mc_t=1`（无 UCB 方差） | `abl_mc1` |
 | 深度来源 | midas / rcsample / lidar（§4.4） | `use_osz_midas` + `osz_dir` 指向对应 npz | `abl_osz_{midas,rcsample,lidar}` |
 

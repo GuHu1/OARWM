@@ -204,7 +204,7 @@ $$L_{col} = \text{BCE}\big(\mu,\ C_{gt};\ \text{pos\_weight}\big), \qquad L_{dyn
 
 输出后接高斯平滑（kernel=5, σ=1.0）——风险场空间平滑，`grid_sample` 采样时规划器梯度稳定；softplus 保证非负且处处可微。
 
-**实现载体**: 当前 `build_risk_field`（`resworld_head.py` L135）输出双通道 `outs['risk_field']`。风险头以同构的 R_exp/R_worst 双通道输出对接（Stage 5 接口不变）；内部组合读数由可学习的读数层承担。
+**实现载体**: `resworld_head.py` 的 `RiskHead` 类，输出双通道 `outs['risk_field'] = [R_exp, R_worst]`，`outs['risk_stats']` 携带平滑后的 μ/σ_epis 供安全监督与 R_safe 标定。
 
 ---
 
@@ -231,7 +231,7 @@ $$L_{plan\_guard} = \frac{1}{T}\sum_{t=1}^T \max\big(0,\ R_{worst}(\tau_t) - R_{
 $$L_{total} = \underbrace{L_{plan\_reg}}_{\text{轨迹回归 (w=10)}} + \underbrace{\lambda_g L_{plan\_guard}}_{\text{安全下界}} + \underbrace{\lambda_{gate}\|g\|_1}_{\text{注入带宽}} + \underbrace{\omega_2 L_{occ\_halluc} + \omega_2' L_{occ\_gt}}_{\text{遮挡想象 (静态/动态)}} + \underbrace{\omega_{2c} L_{risk\_ground} + \omega_3 L_{div} + \omega_4 L_{uncertainty}}_{\text{分布塑造}} + \underbrace{\lambda_{col} L_{col} + \lambda_{dyn} L_{dyn}}_{\text{风险安全监督}}$$
 
 - **$L_{occ\_halluc}$（静态内容想象）**：遮挡区条件分布 p(B_{t+1}|B_t) 以 t+Δt 曝光真值做混合模型对数似然，EM 式联合拟合 π/ΔB/σ；
-- **$L_{occ\_gt}$（动态内容想象）**：`gt_bboxes_3d` 栅格化 BEV 动态占用 `S_gt`，遮挡区占用头 `s_occ` 的 BCE（pos_weight=5.0）。**实现载体**: `_rasterise_boxes_bev`（`resworld_head.py` L1033）；Stage 4 的 `S_dyn` 即该栅格化加 forward margin 的产物，同一份数据、同一处代码；
+- **$L_{occ\_gt}$（动态内容想象）**：`gt_bboxes_3d` 栅格化 BEV 动态占用 `S_gt`，遮挡区占用头 `s_occ` 的 BCE（pos_weight=5.0）。**实现载体**: `_rasterise_dynamic`（`resworld_head.py`）；Stage 4 的 `S_dyn` 即该栅格化加 forward margin 的产物，同一份数据、同一处代码；
 - **$L_{risk\_ground}$（内容对准）**：$(\frac{\sigma}{1+\sigma}\|\Delta B\| - \text{clip}(e^2))^2$——分布层联合产物与曝光误差对齐，使内容变化强度成为曝光变化的无偏读数，遮挡区外不监督；
 - **$L_{div}$（假设多样性）**：假设残差两两余弦相似度最小化（仅遮挡区，clamp ≥ 0），维持 K 假设方向分离；
 - **$L_{uncertainty}$（不确定度校准）**：$|\sigma - \|e\|^2|$——σ 与真实曝光误差对齐，与 L_occ_halluc 共享同一份曝光数据；
