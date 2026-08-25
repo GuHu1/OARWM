@@ -167,9 +167,11 @@ class ResWorldCustomNuScenesDataset(VADCustomNuScenesDataset):
             input_dict['osz_mask'] = _load_osz_mask(
                 self.osz_dir, info['token'],
                 use_drivable=self.use_osz_drivable).copy()
-        if self.use_osz_rcsample and self.use_osz_drivable:
-            # Drivable-area constraint for the online mask (optional; None
-            # when the offline npz is missing). Same .copy() as above.
+        if (self.use_osz or self.use_osz_rcsample) and self.use_osz_drivable:
+            # Raw HD-map drivable mask as an INDEPENDENT key (V2): the
+            # RiskHead consumes it as a dedicated input channel (design doc
+            # Stage 4) while the mask itself may already be intersected into
+            # osz_mask above. Same .copy() rationale.
             dr = _load_drivable_mask(self.osz_dir, info['token'])
             input_dict['drivable_mask'] = None if dr is None else dr.copy()
         if 'occ_path' in info:

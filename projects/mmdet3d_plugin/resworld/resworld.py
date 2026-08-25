@@ -201,6 +201,7 @@ class ResWorld(BEVDepth4D):
                                             ego_fut_masks=ego_fut_masks, ego_fut_cmd=ego_fut_cmd,
                                             ego_lcf_feat=ego_lcf_feat, gt_attr_labels=gt_attr_labels,
                                             osz_mask=kwargs.get('osz_mask'),
+                                            drivable_mask=kwargs.get('drivable_mask'),
                                             gt_bev_next=gt_bev_next)
         losses.update(losses_pts)
         return losses
@@ -221,11 +222,14 @@ class ResWorld(BEVDepth4D):
                           ego_lcf_feat=None,
                           gt_attr_labels=None,
                           osz_mask=None,
+                          drivable_mask=None,
                           gt_bev_next=None):
 
         outs = self.pts_bbox_head(pts_feats, img_metas,
                                   ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat, cmd=ego_fut_cmd,
                                   osz_mask=osz_mask,
+                                  drivable_mask=drivable_mask,
+                                  gt_bboxes=gt_bboxes_3d,
                                   gt_bev_next=gt_bev_next)
         loss_inputs = [
             gt_bboxes_3d, gt_labels_3d, map_gt_bboxes_3d, map_gt_labels_3d,
@@ -271,6 +275,18 @@ class ResWorld(BEVDepth4D):
             if not isinstance(osz_mask, torch.Tensor):
                 osz_mask = torch.as_tensor(osz_mask)   # ndarray -> tensor
             osz_mask = osz_mask[:1]        # (1, 3, H, W)
+        # Same list-wrapping as osz_mask (MultiScaleFlipAug3D); the V2
+        # RiskHead consumes the raw drivable channel at test time too.
+        # May be None (npz without the drivable_mask channel).
+        drivable_mask = kwargs.pop('drivable_mask', None)
+        if drivable_mask is not None:
+            if isinstance(drivable_mask, (list, tuple)):
+                drivable_mask = drivable_mask[0]
+            if drivable_mask is not None and \
+                    not isinstance(drivable_mask, torch.Tensor):
+                drivable_mask = torch.as_tensor(drivable_mask)
+            if drivable_mask is not None:
+                drivable_mask = drivable_mask[:1]   # (1, H, W)
 
         bbox_results = self.simple_test(
             img_metas=img_metas[0],
@@ -284,6 +300,7 @@ class ResWorld(BEVDepth4D):
             ego_lcf_feat=ego_lcf_feat[0],
             gt_attr_labels=gt_attr_labels,
             osz_mask=osz_mask,
+            drivable_mask=drivable_mask,
             **kwargs
         )
 
@@ -307,6 +324,7 @@ class ResWorld(BEVDepth4D):
         ego_lcf_feat=None,
         gt_attr_labels=None,
         osz_mask=None,
+        drivable_mask=None,
         **kwargs
     ):
         """Test function without augmentaiton."""
@@ -334,6 +352,7 @@ class ResWorld(BEVDepth4D):
             ego_lcf_feat=ego_lcf_feat,
             gt_attr_labels=gt_attr_labels,
             osz_mask=osz_mask,
+            drivable_mask=drivable_mask,
         )
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):
             result_dict['pts_bbox'] = pts_bbox
@@ -359,11 +378,14 @@ class ResWorld(BEVDepth4D):
         ego_lcf_feat=None,
         gt_attr_labels=None,
         osz_mask=None,
+        drivable_mask=None,
     ):
         """Test function"""
         outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev, cmd=ego_fut_cmd,
                                   ego_his_trajs=ego_his_trajs, ego_lcf_feat=ego_lcf_feat,
-                                  osz_mask=osz_mask)
+                                  osz_mask=osz_mask,
+                                  drivable_mask=drivable_mask,
+                                  gt_bboxes=gt_bboxes_3d)
 
         bbox_results = []
         for i in range(len(outs['ego_fut_preds'])):

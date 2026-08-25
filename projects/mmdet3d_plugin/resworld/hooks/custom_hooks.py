@@ -24,6 +24,21 @@ class CustomSetEpochInfoHook(Hook):
             model = model.module
         model.set_epoch(epoch)
 
+    def before_train_iter(self, runner):
+        """Inject the runner iter count into the head (V2 gate warmup).
+
+        The head's ``iter`` attribute drives the risk-gated injection
+        warmup (``gate_warmup_iters``, design doc Stage 2): before_train_iter
+        runs right before the forward, so the gate sees the exact iter
+        count of the upcoming step.
+        """
+        model = runner.model
+        if is_module_wrapper(model):
+            model = model.module
+        head = getattr(model, 'pts_bbox_head', None)
+        if head is not None:
+            head.iter = runner.iter
+
 
 @HOOKS.register_module()
 class DiagLoggerHook(Hook):
