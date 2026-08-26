@@ -184,6 +184,11 @@ def main():
                              '1.0 — kept only for diagnostics)')
     parser.add_argument('--out-json', default='work_dirs/occ_subset_tokens.json',
                         help='where to save the subset token list')
+    parser.add_argument('--token-json', default=None,
+                        help='reuse an existing subset token list instead of '
+                             're-filtering — REQUIRED when scoring the SAME '
+                             'subset on another run (e.g. the baseline '
+                             'checkpoint), so both arms see identical tokens')
     parser.add_argument('--ann-file', default=None,
                         help='OPTIONAL cross-check: pkl of the val infos '
                              '(vad_nuscenes_infos_temporal_val.pkl); its '
@@ -193,13 +198,18 @@ def main():
         global RESCORE_ANN_TOKENS
         RESCORE_ANN_TOKENS = [info['token'] for info in mmcv.load(args.ann_file)['infos']]
 
-    data = mmcv.load(args.result_pkl)
-    # tokens must come from the TOKEN-KEYED pkl; the list dump has none.
-    if not (isinstance(data, dict) and 'plan_results' in data):
-        data = load_plan_pkl(args.result_pkl)
-    tokens_in_pkl = set(data['plan_results'].keys())
-    subset = collect_subset(args.osz_dir, args.occ_thresh, tokens_in_pkl,
-                            use_drivable=not args.no_drivable)
+    if args.token_json:
+        with open(args.token_json) as f:
+            subset = json.load(f)['tokens']
+        print(f'subset: {len(subset)} tokens reused from {args.token_json}')
+    else:
+        data = mmcv.load(args.result_pkl)
+        # tokens must come from the TOKEN-KEYED pkl; the list dump has none.
+        if not (isinstance(data, dict) and 'plan_results' in data):
+            data = load_plan_pkl(args.result_pkl)
+        tokens_in_pkl = set(data['plan_results'].keys())
+        subset = collect_subset(args.osz_dir, args.occ_thresh, tokens_in_pkl,
+                                use_drivable=not args.no_drivable)
 
     mmcv.mkdir_or_exist(os.path.dirname(args.out_json) or '.')
     with open(args.out_json, 'w') as f:
