@@ -93,10 +93,37 @@ def main():
     plan_gts = data['plan_gts']
 
     tokens = list(plan_results.keys())
+
+    # Skip samples whose future GT is invalid (fut_valid_flag=False): their
+    # zero-padded trajectories would masquerade as "braking" in the speed
+    # stats — the same filter dataset.evaluate() applies. The flag lives in
+    # the per-sample LIST dump; align it by insertion order (dicts keep
+    # order and _format_bbox filled the token-keyed dicts from that list).
+    invalid = set()
+    raw_pkl = args.result_pkl
+    raw = mmcv.load(raw_pkl)
+    if not isinstance(raw, list):
+        cand = osp.join(osp.dirname(raw_pkl), 'results_nusc_all.pkl')
+        if osp.exists(cand):
+            raw = mmcv.load(cand)
+    if isinstance(raw, list):
+        seq = list(plan_results.keys())
+        if len(seq) == len(raw):
+            for tok_i, item in zip(seq, raw):
+                mr = item.get('metric_results', {})
+                if not mr.get('fut_valid_flag', False):
+                    invalid.add(tok_i)
+            if invalid:
+                print(f'{len(invalid)} tokens skipped (fut_valid_flag=False)')
+        else:
+            print(f'WARNING: list dump length {len(raw)} != token count '
+                  f'{len(seq)} — fut-valid filter skipped')
+
     if args.token_json:
         with open(args.token_json) as f:
             sel = set(json.load(f)['tokens'])
         tokens = [t for t in tokens if t in sel]
+    tokens = [t for t in tokens if t not in invalid]
 
     pred_speeds, gt_speeds = [], []
     near_pred, near_gt, far_pred, far_gt = [], [], [], []
