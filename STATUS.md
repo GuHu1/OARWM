@@ -181,12 +181,13 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash tools/dist_test.sh projects/configs/resw
 
 ### 3.3 可视化评估结果
 
-评估完成后（3.1 会输出 `test/oa_resworld_config/<时间戳>/pts_bbox/results_nusc.pkl`），在**仓库根目录**执行：
+评估完成后（3.1 会输出 `test/oa_resworld_config/<时间戳>/results_nusc_all.pkl`，
+由 `format_results` 直接写在时间戳目录下，**没有** `pts_bbox/` 子层），在**仓库根目录**执行：
 
 ```bash
 # 生成 BEV 轨迹对比视频（vis.mp4，含 6 相机环视 + 预测/GT 轨迹）
 python tools/analysis_tools/visualization.py \
-    --result-path test/oa_resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
+    --result-path test/oa_resworld_config/<时间戳>/results_nusc_all.pkl \
     --save-path work_dirs/viz_oa
 ```
 
@@ -198,16 +199,18 @@ python tools/analysis_tools/visualization.py \
 ```bash
 # ① 遮挡子集筛选 + 子集 L2 重算（occ_frac > 20%，midas npz 为基准）
 python tools/analysis_tools/filter_occ_subset.py \
-    --result-pkl test/oa_resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
+    --result-pkl test/oa_resworld_config/<时间戳>/results_nusc_all.pkl \
     --out-json work_dirs/occ_subset_tokens.json
 
 # ② 近遮挡减速行为统计（掩码边界 5 m 内轨迹步的平均速度：预测 vs GT）
 python tools/analysis_tools/traj_behavior_stats.py \
-    --result-pkl test/oa_resworld_config/<时间戳>/pts_bbox/results_nusc.pkl \
+    --result-pkl test/oa_resworld_config/<时间戳>/results_nusc_all.pkl \
     [--token-json work_dirs/occ_subset_tokens.json]
 ```
 
-- 两个脚本消费 `pts_bbox/results_nusc.pkl`（含 `plan_results` 预测增量轨迹 + `plan_gts` GT 增量轨迹）；L2 口径与评估一致（1s=前 2 步、2s=前 4 步、3s=前 6 步；stp3=末端误差）；
+- 两个脚本消费 `format_results` 落盘的 pkl（顶层键 `plan_results`/`plan_gts`，
+  含预测/GT 增量轨迹；**不要用 sudo 运行**——sudo 会切到系统 python2 并报
+  PEP 263 Non-ASCII 语法错）；L2 口径与评估一致（1s=前 2 步、2s=前 4 步、3s=前 6 步；stp3=末端误差）；
 - 碰撞率子集重算需完整评估重跑（GT 物体框不在落盘 pkl 中）。
 
 ### 3.5 数据说明
