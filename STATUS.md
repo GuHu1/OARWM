@@ -215,6 +215,12 @@ python tools/analysis_tools/traj_behavior_stats.py \
   dict）；两个分析脚本已做自适应——传 list 路径会自动回退到同目录
   `pts_bbox/results_nusc.pkl`。**不要用 sudo 运行**——sudo 会切到系统 python2
   并报 PEP 263 Non-ASCII 语法错；L2 口径与评估一致（1s=前 2 步、2s=前 4 步、3s=前 6 步；stp3=末端误差）；
+- `filter_occ_subset.py --ann-file` 只做 **token 集合**交叉检查（dataset 按
+  timestamp 重排 infos，顺序与 ann-file 的 scene-major 序必然不同；脚本会
+  自证"timestamp 排序后 == pkl 序"）；
+- `traj_behavior_stats.py` 末尾输出 **zero-displacement（turtle）分析**：
+  `traj_end < 0.5m` 样本的占比、near-occluder 步占比与均速（vs 正常样本及
+  同 token 的 GT 均速）——判定龟速是遮挡通道引起还是场景级；
 - 碰撞率子集重算需完整评估重跑（GT 物体框不在落盘 pkl 中）。
 
 ### 3.5 数据说明
@@ -257,6 +263,34 @@ python tools/analysis_tools/traj_behavior_stats.py \
 | 深度来源 | midas / rcsample / lidar（§4.4） | `use_osz_midas` + `osz_dir` 指向对应 npz | `abl_osz_{midas,rcsample,lidar}` |
 
 掩码源二选一：`use_osz_rcsample`（在线，无需导出）/ `use_osz_midas`（离线，先导出）。
+
+### 4.2.1 注入模式对照诊断（高速场景退化分解）
+
+主配置全集 L2 退化 +8~12% 而遮挡子集仅 +1~7.6%（stp3 3s 反超），怀疑退化来自特征层注入在空旷/高速场景的代价。off 臂把注入关闭（RiskHead/MHST/风险损失全部照常训练），即可隔离"注入代价"与"风险头/分布层代价"：
+
+```bash
+# ① config 仅改一行（其余开关不动）：
+#    osz_inject_mode = 'off'
+# ② 训练（独立 work-dir，配置快照自动落盘）
+CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash tools/dist_train.sh \
+    projects/configs/resworld/resworld_config.py 4 \
+    --work-dir work_dirs/abl_inject_off \
+    > work_dirs/abl_inject_off/train.log 2>&1 &
+# ③ 评估
+bash tools/dist_test.sh projects/configs/resworld/resworld_config.py \
+    work_dirs/abl_inject_off/epoch_12_ema.pth 4 --eval bbox
+# ④ 遮挡子集对比（复用同一份 token json，保证两臂同子集）
+python tools/analysis_tools/filter_occ_subset.py \
+    --result-pkl test/oa_resworld_config/<off臂时间戳>/results_nusc_all.pkl \
+    --token-json work_dirs/occ_subset_tokens.json
+```
+
+判读：
+
+- 若 off 臂全集 L2 回到 ≤0.30（接近基线）且遮挡子集增益仍保留 → 代价在注入通道，改模型时把 guard 量纲（R_safe 标定与路径采样同量纲）与注入带宽（`loss_gate_weight`/warmup 长度）一并修；
+- 若 off 臂 L2 不变 → 代价在 RiskHead/MHST 分布层（L_col/L_dyn 或 MHST 对共享表征的间接影响），回 ISSUE §3.2 回退 A/B；
+- 对照 `traj_behavior_stats.py` 的 turtle 占比与 near/far 速度 ratio：注入臂 turtle 样本的 near-occluder 步占比显著高于 off 臂 → 龟速由遮挡通道引起；无差异 → 场景级退化，另查。
+- 资源允许时补 `osz_inject_mode='raw_additive'` 臂作第三参照（无监督加性扰动的代价上界）。
 
 ### 4.3 完整示例（K 消融）
 

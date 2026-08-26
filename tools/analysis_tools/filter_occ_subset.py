@@ -39,8 +39,10 @@ import mmcv
 L2_STEPS = {1: 2, 2: 4, 3: 6}   # 0.5 s per step; 1s/2s/3s horizons
 METRIC_KEYS = ['plan_L2_1s', 'plan_L2_2s', 'plan_L2_3s',
                'plan_L2_stp3_1s', 'plan_L2_stp3_2s', 'plan_L2_stp3_3s']
-# Optional ann-file cross-check for the token order (set by --ann-file).
-RESCORE_ANN_TOKENS = None
+# Optional ann-file cross-check for the token SET (set by --ann-file).
+# Carries the raw info dicts so the timestamp re-sort hypothesis can be
+# verified directly.
+RESCORE_ANN_INFOS = None
 
 
 def load_plan_pkl(pkl_path):
@@ -122,7 +124,14 @@ def rescore_l2(subset, result_pkl):
     iterating the same ``results`` list that ``format_results`` dumped, and
     python dicts preserve insertion order — so
     ``list(plan_results.keys())`` IS the per-position token sequence of the
-    list dump. An optional ``--ann-file`` cross-check validates that order.
+    list dump. No external reference is needed for that alignment.
+
+    The optional ``--ann-file`` cross-check therefore compares token SETS,
+    not sequences: the mmdet3d base dataset re-sorts ``data_infos`` by
+    ``timestamp`` (a global sort that interleaves scenes), so the ann-file
+    order NEVER equals the pkl insertion order by design. A set mismatch,
+    on the other hand, would mean the dataset filtered samples and the
+    caller should know.
     """
     raw = mmcv.load(result_pkl)
     if not isinstance(raw, list):
@@ -136,12 +145,36 @@ def rescore_l2(subset, result_pkl):
         raise SystemExit(
             f'token sequence length {len(tokens_seq)} != list dump length '
             f'{len(raw)} — the two pkls are from different runs')
-    if RESCORE_ANN_TOKENS is not None:
-        if RESCORE_ANN_TOKENS == tokens_seq:
-            print('ann-file token order check: OK')
+    if RESCORE_ANN_INFOS is not None:
+        # SET check only (see docstring): the ann-file order is scene-major
+        # while the dataset re-sorts by timestamp, so sequences differ by
+        # construction. A set difference is the real anomaly.
+        ann_set = set(i['token'] for i in RESCORE_ANN_INFOS)
+        pkl_set = set(tokens_seq)
+        if ann_set == pkl_set:
+            print('ann-file token SET check: OK (order differs by design — '
+                  'the dataset sorts infos by timestamp)')
+            # Self-confirm the re-sort source: the timestamp-sorted ann
+            # order must reproduce the pkl insertion order exactly.
+            try:
+                ts_sorted = [i['token'] for i in sorted(
+                    RESCORE_ANN_INFOS, key=lambda e: e['timestamp'])]
+            except KeyError:
+                ts_sorted = None
+            if ts_sorted is not None:
+                if ts_sorted == tokens_seq:
+                    print('timestamp-sorted ann order == pkl order: the '
+                          'dataset re-sort source confirmed')
+                else:
+                    print('note: timestamp-sorted ann order still differs '
+                          'from the pkl — inspect the dataset '
+                          'load_annotations for extra filtering')
         else:
-            print('WARNING: ann-file token order differs from the pkl '
-                  'insertion order — subset alignment may be wrong')
+            print(f'WARNING: ann-file token SET differs from the pkl — '
+                  f'{len(pkl_set - ann_set)} tokens in pkl only, '
+                  f'{len(ann_set - pkl_set)} in ann only; the dataset may '
+                  f'filter samples (subset alignment stays on the pkl '
+                  f'sequence, which is self-consistent)')
 
     sel = set(subset)
     sums = {k: 0.0 for k in METRIC_KEYS}          # subset
@@ -191,12 +224,14 @@ def main():
                              'checkpoint), so both arms see identical tokens')
     parser.add_argument('--ann-file', default=None,
                         help='OPTIONAL cross-check: pkl of the val infos '
-                             '(vad_nuscenes_infos_temporal_val.pkl); its '
-                             'token order must match the result pkls')
+                             '(vad_nuscenes_infos_temporal_val.pkl); only the '
+                             'token SET is compared (the dataset re-sorts '
+                             'infos by timestamp, so the orders differ by '
+                             'design)')
     args = parser.parse_args()
     if args.ann_file:
-        global RESCORE_ANN_TOKENS
-        RESCORE_ANN_TOKENS = [info['token'] for info in mmcv.load(args.ann_file)['infos']]
+        global RESCORE_ANN_INFOS
+        RESCORE_ANN_INFOS = mmcv.load(args.ann_file)['infos']
 
     if args.token_json:
         with open(args.token_json) as f:
