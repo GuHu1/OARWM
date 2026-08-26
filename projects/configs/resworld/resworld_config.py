@@ -521,6 +521,13 @@ data = dict(
               classes=class_names, modality=input_modality, samples_per_gpu=1,
               osz_dir='data/osz/',
               use_osz=use_osz_midas,
+              # Same OSZ switches as the val split — without these the
+              # dataset never injects 'drivable_mask' into input_dict while
+              # test_pipeline's CustomCollect3D still collects it
+              # (top-level use_osz_drivable=True), crashing with
+              # KeyError: 'drivable_mask' on the first batch.
+              use_osz_rcsample=use_osz_rcsample,
+              use_osz_drivable=use_osz_drivable,
               use_next=use_osz,
               map_classes=map_classes,
               map_ann_file=data_root + 'nuscenes_map_anns_val.json',
