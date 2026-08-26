@@ -208,9 +208,13 @@ python tools/analysis_tools/traj_behavior_stats.py \
     [--token-json work_dirs/occ_subset_tokens.json]
 ```
 
-- 两个脚本消费 `format_results` 落盘的 pkl（顶层键 `plan_results`/`plan_gts`，
-  含预测/GT 增量轨迹；**不要用 sudo 运行**——sudo 会切到系统 python2 并报
-  PEP 263 Non-ASCII 语法错）；L2 口径与评估一致（1s=前 2 步、2s=前 4 步、3s=前 6 步；stp3=末端误差）；
+- 两个脚本消费 **token-keyed** 的 `pts_bbox/results_nusc.pkl`（顶层键
+  `plan_results`/`plan_gts`，含预测/GT 增量轨迹）。eval 时间戳目录下有两种
+  pkl：`results_nusc_all.pkl`（`format_results` 直接 dump 的逐样本 **list**，
+  无 token 键）与 `pts_bbox/results_nusc.pkl`（`_format_bbox` 写的 token-keyed
+  dict）；两个分析脚本已做自适应——传 list 路径会自动回退到同目录
+  `pts_bbox/results_nusc.pkl`。**不要用 sudo 运行**——sudo 会切到系统 python2
+  并报 PEP 263 Non-ASCII 语法错；L2 口径与评估一致（1s=前 2 步、2s=前 4 步、3s=前 6 步；stp3=末端误差）；
 - 碰撞率子集重算需完整评估重跑（GT 物体框不在落盘 pkl 中）。
 
 ### 3.5 数据说明

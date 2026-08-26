@@ -21,6 +21,7 @@ Usage (from the repo root):
 """
 import argparse
 import json
+import os.path as osp
 
 import numpy as np
 import mmcv
@@ -30,6 +31,30 @@ GRID = dict(x_min=-15.0, x_cell=0.15, y_min=-30.0, y_cell=0.3)
 NEAR_M = 5.0            # "near an occlusion boundary" radius (metres)
 CELL_M = 0.3            # coarse-axis cell size used for the distance scale
 STEP_S = 0.5            # seconds per trajectory step
+
+
+def load_plan_pkl(pkl_path):
+    """Return the TOKEN-KEYED plan pkl ``{'plan_results', 'plan_gts'}``.
+
+    Same dual-layout contract as filter_occ_subset.py: if handed the
+    per-sample LIST dump (``<ts>/results_nusc_all.pkl``, written by
+    ``format_results``), fall back to the sibling token-keyed
+    ``pts_bbox/results_nusc.pkl`` (written by ``_format_bbox``).
+    """
+    data = mmcv.load(pkl_path)
+    if isinstance(data, dict) and 'plan_results' in data:
+        return data
+    cand = osp.join(osp.dirname(pkl_path), 'pts_bbox', 'results_nusc.pkl')
+    if osp.exists(cand):
+        alt = mmcv.load(cand)
+        if isinstance(alt, dict) and 'plan_results' in alt:
+            print(f'note: {pkl_path} carries no token keys; using {cand}')
+            return alt
+    raise SystemExit(
+        f"'{pkl_path}' is not a token-keyed plan pkl and '{cand}' does not "
+        f"exist either. List the eval dir to locate "
+        f"pts_bbox/results_nusc.pkl:\n"
+        f"  find {osp.dirname(pkl_path) or 'test/'} -name '*.pkl'")
 
 
 def mask_dist(npz_path):
@@ -63,7 +88,7 @@ def main():
                         help='optional subset list from filter_occ_subset.py')
     args = parser.parse_args()
 
-    data = mmcv.load(args.result_pkl)
+    data = load_plan_pkl(args.result_pkl)
     plan_results = data['plan_results']
     plan_gts = data['plan_gts']
 

@@ -30,12 +30,43 @@ Usage (from the repo root):
 import argparse
 import json
 import os
+import os.path as osp
 
 import numpy as np
 import torch
 import mmcv
 
 L2_STEPS = {1: 2, 2: 4, 3: 6}   # 0.5 s per step; 1s/2s/3s horizons
+
+
+def load_plan_pkl(pkl_path):
+    """Return the TOKEN-KEYED plan pkl ``{'plan_results', 'plan_gts'}``.
+
+    Two pkl layouts exist under each eval timestamp dir (both written by
+    nuscenes_vad_dataset.py):
+
+      * ``<ts>/pts_bbox/results_nusc.pkl`` — token-keyed dict written by
+        ``_format_bbox`` (what this script needs);
+      * ``<ts>/results_nusc_all.pkl``      — the raw per-sample LIST dumped
+        by ``format_results`` (NO token keys — unusable for subsetting).
+
+    If handed the list dump (or any dict without ``plan_results``), fall
+    back to the sibling ``pts_bbox/results_nusc.pkl``.
+    """
+    data = mmcv.load(pkl_path)
+    if isinstance(data, dict) and 'plan_results' in data:
+        return data
+    cand = osp.join(osp.dirname(pkl_path), 'pts_bbox', 'results_nusc.pkl')
+    if osp.exists(cand):
+        alt = mmcv.load(cand)
+        if isinstance(alt, dict) and 'plan_results' in alt:
+            print(f'note: {pkl_path} carries no token keys; using {cand}')
+            return alt
+    raise SystemExit(
+        f"'{pkl_path}' is not a token-keyed plan pkl and '{cand}' does not "
+        f"exist either. List the eval dir to locate "
+        f"pts_bbox/results_nusc.pkl:\n"
+        f"  find {osp.dirname(pkl_path) or 'test/'} -name '*.pkl'")
 
 
 def occ_frac_of(npz_path):
@@ -64,7 +95,7 @@ def collect_subset(osz_dir, thresh, tokens_in_pkl):
 
 
 def rescore_l2(subset, pkl_path):
-    data = mmcv.load(pkl_path)
+    data = load_plan_pkl(pkl_path)
     plan_results = data['plan_results']
     plan_gts = data['plan_gts']
 
@@ -112,6 +143,9 @@ def main():
     args = parser.parse_args()
 
     data = mmcv.load(args.result_pkl)
+    # tokens must come from the TOKEN-KEYED pkl; the list dump has none.
+    if not (isinstance(data, dict) and 'plan_results' in data):
+        data = load_plan_pkl(args.result_pkl)
     tokens_in_pkl = set(data['plan_results'].keys())
     subset = collect_subset(args.osz_dir, args.occ_thresh, tokens_in_pkl)
 
