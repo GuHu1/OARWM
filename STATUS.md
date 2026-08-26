@@ -161,23 +161,36 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash tools/dist_test.sh projects/configs/resw
 
 ### 3.2 指标参考（UniAD/VAD 风格开环）
 
-以下为已完成的评测记录（按评测日期区分配置）；主配置训练完成后更新：
+以下为已完成的评测记录（按评测日期区分配置）；模型结构已定稿，2026-08-26 为主配置（最终结构）评测：
 
 **L2 (ADE):**
 
-| 配置 | L2 1s | L2 2s | L2 3s | L2 Avg | CR Avg |
-|---|---|---|---|---|---|
-| **ResWorld** | 0.142 | 0.271 | 0.486 | **0.300** | 0.17 |
-| OARWM (2026-08-23 评测, offline MiDaS) | 0.166 | 0.312 | 0.542 | 0.340 | 8.3e-4 |
-| OARWM (主配置, 待训) | — | — | — | — | — |
+| 配置 | L2 1s | L2 2s | L2 3s | L2 Avg | CR 1s | CR 2s | CR 3s | CR Avg |
+|---|---|---|---|---|---|---|---|---|
+| **ResWorld** | 0.142 | 0.271 | 0.486 | **0.300** | 0.02 | 0.06 | 0.43 | **0.17** |
+| OARWM (2026-08-23 评测, offline MiDaS) | 0.166 | 0.312 | 0.542 | 0.340 | 9.8e-5 | 3.9e-4 | 2.0e-3 | 8.3e-4 |
+| **OARWM 主配置 (2026-08-26)** | 0.159 | 0.302 | 0.525 | 0.329 | 0 | 4.9e-5 | 6.5e-5 | 3.8e-5 |
+
+CR 为 obj_col 口径；主配置 box_col：1s 9.8e-5 / 2s 4.9e-4 / 3s 1.5e-3。
 
 **L2_stp3(终点 FDE):**
 
-| 配置 | stp3 Avg | CR Avg |
-|---|---|---|
-| **ResWorld** | **0.586** | **0.06** |
-| OARWM (2026-08-23 评测, offline MiDaS) | 0.651 | 2.6e-3 |
-| OARWM (主配置, 待训) | — | — |
+| 配置 | stp3 1s | stp3 2s | stp3 3s | stp3 Avg | CR 1s | CR 2s | CR 3s | CR Avg |
+|---|---|---|---|---|---|---|---|---|
+| **ResWorld** | 0.185 | 0.493 | 1.081 | **0.586** | 0.01 | 0.03 | 0.14 | **0.06** |
+| OARWM (2026-08-23 评测, offline MiDaS) | 0.218 | 0.557 | 1.177 | 0.651 | 2.0e-4 | 1.2e-3 | 6.4e-3 | 2.6e-3 |
+| **OARWM 主配置 (2026-08-26)** | 0.210 | 0.543 | 1.135 | 0.629 | 0 | 2.0e-4 | 2.0e-4 | 1.3e-4 |
+
+CR 为 obj_col_stp3 口径；主配置 box_col_stp3：1s 2.0e-4 / 2s 1.2e-3 / 3s 4.9e-3。
+
+**遮挡子集**（`filter_occ_subset.py`，occ_frac ≥ 0.2 + drivable-intersected，valid n=856/1004 选中）：
+
+| 指标 | OARWM 主配置 | ResWorld 基线 | 子集退化 |
+|---|---|---|---|
+| subset L2 1s / 2s / 3s | 0.115 / 0.228 / 0.412 | 0.107 / 0.218 / 0.407 | +7.6% / +4.6% / +1.1% |
+| subset stp3 1s / 2s / 3s | 0.152 / 0.420 / 0.922 | 0.141 / 0.409 / 0.936 | +8.4% / +2.7% / **−1.5%** |
+
+全集 L2 退化 +8~12% 而遮挡子集仅 +1~7.6%（stp3 3s 反超基线），退化主要在非遮挡场景——见 §4.2.1 注入模式对照诊断。
 
 ### 3.3 可视化评估结果
 
@@ -287,7 +300,7 @@ python tools/analysis_tools/filter_occ_subset.py \
 
 判读：
 
-- 若 off 臂全集 L2 回到 ≤0.30（接近基线）且遮挡子集增益仍保留 → 代价在注入通道，改模型时把 guard 量纲（R_safe 标定与路径采样同量纲）与注入带宽（`loss_gate_weight`/warmup 长度）一并修；
+- 若 off 臂全集 L2 回到 ≤0.30（接近基线）且遮挡子集增益仍保留 → 代价在注入通道。模型结构已定稿，修正限于开关/超参：`loss_gate_weight`（带宽预算）、`gate_warmup_iters`（冻结期）与 guard 参数（`risk_safe_quantile`/`risk_safe_ema`）；
 - 若 off 臂 L2 不变 → 代价在 RiskHead/MHST 分布层（L_col/L_dyn 或 MHST 对共享表征的间接影响），回 ISSUE §3.2 回退 A/B；
 - 对照 `traj_behavior_stats.py` 的 turtle 占比与 near/far 速度 ratio：注入臂 turtle 样本的 near-occluder 步占比显著高于 off 臂 → 龟速由遮挡通道引起；无差异 → 场景级退化，另查。
 - 资源允许时补 `osz_inject_mode='raw_additive'` 臂作第三参照（无监督加性扰动的代价上界）。
