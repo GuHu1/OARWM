@@ -39,20 +39,21 @@ class ResWorld(BEVDepth4D):
         Pure supervision channel: runs under no_grad and NEVER enters the
         main training inputs / multi-frame fusion / col_attn.
 
-        BN CONTRACT (fixed 2026-08-27): the backbone / view transformer /
-        bev encoder are switched to eval() for the duration of this
-        forward. ``torch.no_grad()`` alone does NOT stop BatchNorm from
-        updating its running stats in training mode — with this extra
-        per-iter forward the running-stats EMA updates were effectively
-        doubled (and fed by a smaller, noisier batch), which polluted the
-        BN normalisation used at EVAL time. That is the only channel
-        through which the supervision encoding touches the trained trunk,
-        and it is the top suspect for the train/val split observed in the
-        2026-08 runs (training loss_plan_reg matched the baseline while
-        val L2 degraded ~8%). eval() freezes the running stats (the trunk
-        has no dropout, so nothing else changes); the encoding result
-        (used only as an MHST exposure target) now uses running stats,
-        which is also closer to the eval semantics.
+        BN CONTRACT (fixed 2026-08-27): the image backbone / view
+        transformer / bev-encoder backbone & neck are switched to eval()
+        for the duration of this forward. ``torch.no_grad()`` alone does
+        NOT stop BatchNorm from updating its running stats in training
+        mode — with this extra per-iter forward the running-stats EMA
+        updates were effectively doubled (and fed by a smaller, noisier
+        batch), which polluted the BN normalisation used at EVAL time.
+        That is the only channel through which the supervision encoding
+        touches the trained trunk, and it is the top suspect for the
+        train/val split observed in the 2026-08 runs (training
+        loss_plan_reg matched the baseline while val L2 degraded ~8%).
+        eval() freezes the running stats (the trunk has no dropout, so
+        nothing else changes); the encoding result (used only as an MHST
+        exposure target) now uses running stats, which is also closer to
+        the eval semantics.
         """
         imgs_next, sensor2keyegos_next, ego2globals_next, intrins_next, \
             post_rots_next, post_trans_next, bda_next = next_img_inputs
@@ -63,7 +64,7 @@ class ResWorld(BEVDepth4D):
                        intrins_next, post_rots_next, post_trans_next,
                        bda_next, mlp_input)
         mods = [self.img_backbone, self.img_view_transformer,
-                self.bev_encoder]
+                self.img_bev_encoder_backbone, self.img_bev_encoder_neck]
         training = [m.training for m in mods]
         for m in mods:
             m.eval()
