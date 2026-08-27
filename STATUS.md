@@ -13,10 +13,10 @@
 | **2 显式遮挡几何** | OSZ 高度感知射线投射生成遮挡掩码；**三态注入**：`risk_gated`（风险门控回流 `B̃ = B + g⊙Proj([R_exp.detach(), R_worst.detach()])`，g 零初始化 + tanh 上界 + warmup 冻结 + L1 预算，Proj 常规增益）/ `raw_additive`（无监督加性残差，消融臂）/ `off`（等价基线） | `OSZ/`、`resworld_head.py::OcclusionAwareFusion`、`nuscenes_resworld_dataset.py` | `use_osz_midas`/`use_osz_rcsample`（掩码源互斥）、`osz_inject_mode`、`gate_warmup_iters`、`loss_gate_weight` |
 | **3 多假设 MHST** | 遮挡区 K 假设残差转移：先验网络（多尺度膨胀邻域）+ K expert 分支（零初始化）+ σ 不确定性 + 硬限幅（ΔB ±10 / σ≤10）；**col_attn 消费干净 `pred_bev`**，混合分布不回流；occ_head 随 `use_oarwm` 创建（RiskHead 的 s_occ 输入） | `resworld_head.py::OcclusionMHSTHead` | `use_oarwm`、`mhst_k=5`、`mhst_sigma_min=0.1`、`mhst_delta_clamp`、`mhst_sigma_max` |
 | **4 可学习 RiskHead** | 输入全 detach（`B_t`、`M`、`drivable`、`φ=σ/(1+σ)·‖ΔB‖`、`s_occ`、`1/(1+d)`、`cmd_embed`）；MC-dropout（末两层 dropout，T=4 前向）；输出 `μ`（sigmoid，BCE 兼容）+ `σ_epis`（dropout 方差）；双通道契约 `R_exp=clamp(μ,0,R_max)`、`R_worst=clamp(μ+β·σ_epis,0,R_max)`；高斯平滑（kernel=5, σ=1.0） | `resworld_head.py::RiskHead` | `use_risk_field`、`risk_hidden/dropout/mc_t`、`risk_beta`、`risk_max`、`risk_smooth_ks/sigma` |
-| **5 绝对阈值安全下界** | `L_plan_guard = (1/T)Σ_t max(0, R_worst(τ_t) − R_safe)`；`R_safe = EMA_0.999[quantile_0.1(μ \| 碰撞格)]`（buffer，batch 无碰撞正例不更新，DDP all_reduce 同步）；采样风险场输入 detach（规划只学规避、不塑形风险场）；`gt_relative`（沿程相对 + CVaR 消融）为回退臂 | `resworld_head.py::loss` | `use_risk_plan`、`risk_plan_mode`、`loss_plan_guard_weight`、`risk_safe_quantile/ema`、`loss_plan_cvar_weight`（消融） |
+| **5 绝对阈值安全下界** | `L_plan_guard = (1/T)Σ_t max(0, R_worst(τ_t) − R_safe)`；`R_safe = EMA_0.99[quantile_0.1(采样 R_worst \| 碰撞格)]`——标定用与 guard 消费**相同的 bilinear grid_sample 读数**（量纲对齐，2026-08-27 修复：此前用格级 μ 分位，阈值 ~0.71 vs 路径采样 ~0.01-0.13，guard 恒 0）；buffer 无碰撞正例不更新，DDP 无条件 all_reduce 同步；采样风险场输入 detach（规划只学规避、不塑形风险场）；`gt_relative`（沿程相对 + CVaR 消融）为回退臂 | `resworld_head.py::_loss_risk_supervision` | `use_risk_plan`、`risk_plan_mode`、`loss_plan_guard_weight`、`risk_safe_quantile/ema`、`loss_plan_cvar_weight`（消融） |
 | **6 端到端损失** | 八项：分布族五项（`L_div`/`L_occ_halluc`/`L_uncertainty`/`L_occ_gt`/`L_risk_ground`）+ 安全/门控三项（`L_col` 碰撞占用 BCE（GT 未来足迹 ∩ 动态占用）、`L_dyn` 动态占用 BCE（`S_dyn` = 栅格 + 沿朝向 forward margin 2 m）、`L_gate=λ·‖g‖₁`）；`L_occ_gt` 目标为动态占用 `S_gt`（遮挡区 BCE，pos_weight=5） | `resworld_head.py::loss`、`_rasterise_dynamic`、`resworld.py::encode_next_bev`、`nuscenes_resworld_dataset.py`（`use_next`）、`loading.py` | 各 `loss_*_weight`（0=关）、`dyn_forward_margin`、`dyn_vel_thresh` |
 
-**工程与基础**（贯穿各 Stage）：OSZ 网格对齐 ResWorld（200×200 各向异性，单一来源 `OSZ/config.py`）；`use_osz`/`use_oarwm` 条件实例化（开关关闭零参数，防 DDP 未使用参数）；next 帧独立监督通道（`gt_bev_next` 不进训练输入）；`risk_safe`/`gate` 等训练状态注册为 buffer/参数，DDP 同步；`CustomSetEpochInfoHook` 每 iter 前注入 `head.iter`（gate warmup 按 iter 计）；RCSample 深度估计器与训练管线严格对齐；`--depth-source {midas,rcsample,lidar}` 三臂；`--backend {numpy,torch,auto}` GPU 加速。
+**工程与基础**（贯穿各 Stage）：OSZ 网格对齐 ResWorld（200×200 各向异性，单一来源 `OSZ/config.py`）；`use_osz`/`use_oarwm` 条件实例化（开关关闭零参数，防 DDP 未使用参数）；next 帧独立监督通道（`gt_bev_next` 不进训练输入，**且 `encode_next_bev` 期间 trunk 置 eval() 冻结 BN running stats**——2026-08-27 修复：no_grad 不阻止 BN 更新 running stats，每 iter 多跑一次编码曾使评估期 BN 归一化被污染）；`risk_safe`/`gate` 等训练状态注册为 buffer/参数，DDP 同步；`CustomSetEpochInfoHook` 每 iter 前注入 `head.iter`（gate warmup 按 iter 计）；RCSample 深度估计器与训练管线严格对齐；`--depth-source {midas,rcsample,lidar}` 三臂；`--backend {numpy,torch,auto}` GPU 加速。
 
 ---
 
@@ -63,12 +63,13 @@ risk_cmd_proj = 8          # cmd 嵌入投影通道（共享 navi_embedding，�
 use_risk_plan = True
 risk_plan_mode = 'absolute_hinge'   # 主配置；'gt_relative'（沿程相对项）为回退臂
 loss_plan_guard_weight = 0.1        # L_plan_guard 权重（λ_g）
-risk_safe_quantile = 0.1            # R_safe 标定分位数（碰撞格 μ 的 0.1 分位）
-risk_safe_ema = 0.999               # R_safe EMA 系数（按含正例的 step 计步：无正例
+risk_safe_quantile = 0.1            # R_safe 标定分位数（碰撞格上 grid_sample 采样
+                                    # 后 R_worst 的 0.1 分位——与 guard 消费同量纲）
+risk_safe_ema = 0.99                # R_safe EMA 系数（按含正例的 step 计步：无正例
                                     # step 不推进；每步一次无条件 all_reduce（正例
                                     # 分位数 + 有效标志打包聚合，保证各 rank 集合通信
-                                    # 序列对称）；半衰期 ≈693 个正例 step，收敛速度由
-                                    # 碰撞密度决定）
+                                    # 序列对称）；半衰期 ≈69 个正例 step——采样量纲
+                                    # (~0.001-0.13) 远低于 1.0 初值，0.999 会全程休眠）
 risk_plan_margin = 1.0              # 仅 gt_relative 模式使用
 loss_plan_cvar_weight = 0.0         # CVaR 尾部项（消融臂，默认关）
 cvar_beta = 0.25                    # CVaR 尾部比例
@@ -169,9 +170,16 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 nohup bash tools/dist_test.sh projects/configs/resw
 |---|---|---|---|---|---|---|---|---|
 | **ResWorld** | 0.142 | 0.271 | 0.486 | **0.300** | 0.02 | 0.06 | 0.43 | **0.17** |
 | OARWM (2026-08-23 评测, offline MiDaS) | 0.166 | 0.312 | 0.542 | 0.340 | 9.8e-5 | 3.9e-4 | 2.0e-3 | 8.3e-4 |
-| **OARWM 主配置 (2026-08-26)** | 0.159 | 0.302 | 0.525 | 0.329 | 0 | 4.9e-5 | 6.5e-5 | 3.8e-5 |
+| **OARWM 主配置 (2026-08-26, risk_gated)** | 0.159 | 0.302 | 0.525 | 0.329 | 0 | 4.9e-5 | 6.5e-5 | 3.8e-5 |
+| **OARWM off 臂 (2026-08-27, osz_inject_mode='off')** | 0.163 | 0.306 | 0.533 | 0.334 | 0 | 4.9e-5 | 1.3e-4 | 6.1e-5 |
 
 CR 为 obj_col 口径；主配置 box_col：1s 9.8e-5 / 2s 4.9e-4 / 3s 1.5e-3。
+
+**结论（注入模式对照，2026-08-27）**：off 臂与主配置逐指标重合（差异 ≤±0.02，方向不一致）——
+风险注入通道对 L2/CR 无任何可测量影响；L2 退化 8-12% 的来源在两臂共有部分（数据管线
+`use_next` 跳过 train 序列末尾样本 / next 帧加载），或 ResWorld 固有特性。off 臂 E12 日志
+`guard_act` 有零星非零（0.08-0.18）、`loss_plan_guard≈1e-4`——Stage 5 跑满 12 epoch 后稀疏
+行使，非死项。
 
 **L2_stp3(终点 FDE):**
 
@@ -180,17 +188,24 @@ CR 为 obj_col 口径；主配置 box_col：1s 9.8e-5 / 2s 4.9e-4 / 3s 1.5e-3。
 | **ResWorld** | 0.185 | 0.493 | 1.081 | **0.586** | 0.01 | 0.03 | 0.14 | **0.06** |
 | OARWM (2026-08-23 评测, offline MiDaS) | 0.218 | 0.557 | 1.177 | 0.651 | 2.0e-4 | 1.2e-3 | 6.4e-3 | 2.6e-3 |
 | **OARWM 主配置 (2026-08-26)** | 0.210 | 0.543 | 1.135 | 0.629 | 0 | 2.0e-4 | 2.0e-4 | 1.3e-4 |
+| **OARWM off 臂 (2026-08-27)** | 0.213 | 0.550 | 1.155 | 0.639 | 0 | 2.0e-4 | 3.9e-4 | 2.0e-4 |
 
 CR 为 obj_col_stp3 口径；主配置 box_col_stp3：1s 2.0e-4 / 2s 1.2e-3 / 3s 4.9e-3。
 
 **遮挡子集**（`filter_occ_subset.py`，occ_frac ≥ 0.2 + drivable-intersected，valid n=856/1004 选中）：
 
-| 指标 | OARWM 主配置 | ResWorld 基线 | 子集退化 |
-|---|---|---|---|
-| subset L2 1s / 2s / 3s | 0.115 / 0.228 / 0.412 | 0.107 / 0.218 / 0.407 | +7.6% / +4.6% / +1.1% |
-| subset stp3 1s / 2s / 3s | 0.152 / 0.420 / 0.922 | 0.141 / 0.409 / 0.936 | +8.4% / +2.7% / **−1.5%** |
+| 指标 | OARWM 主配置 | off 臂 | ResWorld 基线 | 主配置子集退化 |
+|---|---|---|---|---|
+| subset L2 1s / 2s / 3s | 0.115 / 0.228 / 0.412 | 0.113 / 0.230 / 0.425 | 0.107 / 0.218 / 0.407 | +7.6% / +4.6% / +1.1% |
+| subset stp3 1s / 2s / 3s | 0.152 / 0.420 / 0.922 | 0.150 / 0.431 / 0.965 | 0.141 / 0.409 / 0.936 | +8.4% / +2.7% / **−1.5%** |
 
-全集 L2 退化 +8~12% 而遮挡子集仅 +1~7.6%（stp3 3s 反超基线），退化主要在非遮挡场景——见 §4.2.1 注入模式对照诊断。
+全集 L2 退化 +8~12% 而遮挡子集仅 +1~7.6%（stp3 3s 反超基线）；off 臂子集与主配置同量级——
+注入通道排除。**turtle（零位移）样本三臂完全一致**（主配置 361/7.8%、off 360/7.7%、
+**ResWorld 基线 360/7.7%**，near-occluder 步占比 0.78 vs 正常样本 0.88，turtle token 的
+GT 均速仅 0.35 m/s）："缓行→停死"放大是 **ResWorld 基线固有行为**，OARWM 任何机制
+（注入/MHST/风险/guard）都不加重也不减轻它——turtle 从当前退化来源中除名，转为基线
+固有缺陷的改进目标。near ratio：基线 0.993、主配置 0.974、off 0.977——OARWM 全局慢
+~2%（near/far 同步，非遮挡特异）。
 
 ### 3.3 可视化评估结果
 
@@ -298,11 +313,28 @@ python tools/analysis_tools/filter_occ_subset.py \
     --token-json work_dirs/occ_subset_tokens.json
 ```
 
-判读：
+判读（2026-08-27 结果已出：**off ≈ gated 逐指标重合，注入通道排除**）：
 
-- 若 off 臂全集 L2 回到 ≤0.30（接近基线）且遮挡子集增益仍保留 → 代价在注入通道。模型结构已定稿，修正限于开关/超参：`loss_gate_weight`（带宽预算）、`gate_warmup_iters`（冻结期）与 guard 参数（`risk_safe_quantile`/`risk_safe_ema`）；
-- 若 off 臂 L2 不变 → 代价在 RiskHead/MHST 分布层（L_col/L_dyn 或 MHST 对共享表征的间接影响），回 ISSUE §3.2 回退 A/B；
-- 对照 `traj_behavior_stats.py` 的 turtle 占比与 near/far 速度 ratio：注入臂 turtle 样本的 near-occluder 步占比显著高于 off 臂 → 龟速由遮挡通道引起；无差异 → 场景级退化，另查。
+- ✅ 已得结论：off 臂全集 L2 0.163/0.306/0.533 与主配置 0.159/0.302/0.525 重合，turtle
+  占比 7.7% vs 7.8% 相同——风险注入（g_l1≈0.2）对规划行为无任何可测量影响，注入不是
+  L2 退化的来源；guard 在 off 臂 E12 有零星激活（guard_act 0.08-0.18、loss_plan_guard≈1e-4），
+  Stage 5 非死项；
+- 下一步待查（已闭环两处）：
+  1. ✅ 基线 turtle 已验：360/7.7% 与 OARWM 两臂相同——turtle 是 ResWorld 基线固有行为，
+     OARWM 机制不加重不减轻（见 §3.2）；
+  2. ✅ train 跳过样本已查清：no-next 700/28130 (2.5%)、cross-scene 0。mmdet3d base 的
+     `__getitem__` 对 `prepare_train_data` 返回 None 走 `_rand_another` 随机重采样（这解释
+     了 3517 iters/epoch 不缩水）——scene 末尾样本被随机样本替代而非分布缺失，量级 2.5%，
+     基本排除为退化主因；
+  3. 剩余嫌疑与处置（2026-08-27）：
+     (a) ✅ `encode_next_bev` 的 BN running-stats 翻倍更新——**已修复**：编码期间
+     backbone/view_transformer/bev_encoder 置 eval()（no_grad 不冻结 BN running
+     stats；trunk 无 dropout，eval 只影响 BN）。训练损失与基线一致而评估 L2 退化
+     的 train/val 分化正是评估期 BN 归一化被污染的特征；
+     (b) ✅ 全局 grad clip 被辅助损失占用——**已排除**：基线冷启动期同样被裁
+     （83/54/43/37），且 AdamW 对统一梯度缩放不敏感（m 与 √v 同比缩放）；
+     (c) guard 量纲错位——**已修复**：R_safe 标定改为碰撞格上 grid_sample 采样后
+     R_worst 的分位（与 guard 消费同量纲），EMA 0.99（见 §1 Stage 5 行）。
 - 资源允许时补 `osz_inject_mode='raw_additive'` 臂作第三参照（无监督加性扰动的代价上界）。
 
 ### 4.3 完整示例（K 消融）

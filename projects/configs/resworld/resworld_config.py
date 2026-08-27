@@ -115,21 +115,21 @@ loss_plan_guard_weight = 0.1     # λ_g on L_plan_guard (soft floor)
 loss_plan_risk_weight = 0.1      # gt_relative arm only
 loss_plan_cvar_weight = 0.0      # CVaR tail term (ablation, default OFF)
 cvar_beta = 0.25                 # CVaR tail fraction of the trajectory steps
-# R_safe calibration (absolute_hinge): quantile of mu over collision
-# positive cells, EMA'ed. Steps without positives on ANY rank advance
-# nothing (there is no quantile to calibrate against). Half-life of
-# EMA 0.999 is ln2/ln(1/0.999) ≈ 693 positive steps; with sparse
-# collisions this is the dominant convergence time. If [DIAG] risk_safe
-# stays pinned at 1.0 while loss_col settles, the positive density is too
-# low — raise the update step (e.g. risk_safe_ema=0.99) or accept a
-# dormant guard. The buffer is aggregated by ONE always-executed
+# R_safe calibration (absolute_hinge): quantile of the SAMPLED R_worst
+# over collision-positive cells, EMA'ed — the same bilinear grid_sample
+# read the guard hinge consumes, so threshold and hinge share one scale.
+# Steps without positives on ANY rank advance nothing (there is no
+# quantile to calibrate against). Half-life of EMA 0.99 is ~69 positive
+# steps — the sampled scale (~0.001-0.13) is far below the 1.0 init, so
+# the faster EMA matters (with 0.999 the guard would stay dormant for
+# most of the run). The buffer is aggregated by ONE always-executed
 # all_reduce per step (per-rank positive quantiles packed with a valid
 # flag, so every rank reaches the collective unconditionally —
 # conditionally executed collectives desynchronise the ranks and
 # deadlock NCCL) and updated in place (register_buffer binding).
 # Init 1.0 = guard dormant until calibrated (R_worst <= risk_max = 1.0).
 risk_safe_quantile = 0.1
-risk_safe_ema = 0.999
+risk_safe_ema = 0.99
 # GT-risk upper-bound margin (gt_relative mode only): max(0, R(pred) -
 # R(gt) - margin); 0 = pure upper bound.
 risk_plan_margin = 1.0

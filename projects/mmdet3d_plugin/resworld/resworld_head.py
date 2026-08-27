@@ -513,7 +513,11 @@ class ResWorldHead(BaseModule):
                  # R_safe calibration: EMA_0.999[ quantile_q(mu | collision
                  # cells) ]. Buffer init 1.0 (guard dormant until calibrated).
                  risk_safe_quantile=0.1,
-                 risk_safe_ema=0.999,
+                 # EMA over the SAMPLED R_worst collision quantile (the
+                 # scale the guard hinge consumes). 0.99 = ~69-positive-step
+                 # half-life — the sampled scale is far below the 1.0 init,
+                 # so 0.999 would keep the guard dormant for most of the run.
+                 risk_safe_ema=0.99,
                  # Risk terms are disabled for the first N epochs (the risk
                  # head needs its safety supervision to shape the field
                  # before it steers the planner). The field is
@@ -1203,13 +1207,17 @@ class ResWorldHead(BaseModule):
             # the [DIAG] line (R_safe calibration fuel).
             self._diag_col_n = int((c_gt > 0.5).float().sum().item())
             # R_safe calibration (design doc Stage 5): EMA over the
-            # collision-positive mu quantile. Steps without ANY positive
-            # (across ranks) advance nothing — there is no quantile to
-            # calibrate against, and pulling the threshold down on empty
-            # steps would keep the guard permanently active. With EMA
-            # 0.999 the half-life is ~693 positive steps, so the
-            # calibration speed is set by the collision density, not by
-            # wall-clock iters.
+            # collision-positive quantile of the SAMPLED R_worst — the
+            # same bilinear grid_sample read the guard hinge consumes
+            # (mode='bilinear', align_corners=True). Calibrating on the
+            # raw cell-level mu used to be ~10x the path-sampled values
+            # (risk_safe ~0.71 vs r_cmd ~0.01-0.13), which kept
+            # L_plan_guard dormant. Steps without ANY positive (across
+            # ranks) advance nothing — there is no quantile to calibrate
+            # against, and pulling the threshold down on empty steps
+            # would keep the guard permanently active. With EMA 0.99 the
+            # half-life is ~69 positive steps (the sampled scale is far
+            # below the 1.0 init, so the faster EMA matters).
             if self.risk_plan_mode == 'absolute_hinge':
                 # DDP contract: every rank must reach the collective
                 # UNCONDITIONALLY — gating the all_reduce on this rank's
@@ -1222,12 +1230,29 @@ class ResWorldHead(BaseModule):
                 # has none; ONE always-executed all_reduce aggregates
                 # both, and the mean over the positive ranks keeps every
                 # rank's buffer identical.
-                pos_cells = mu.detach()[c_gt > 0.5]
+                rf = preds_dicts['risk_field'].detach()  # (B, 2, H, W)
                 local = torch.zeros(2, device=mu.device, dtype=mu.dtype)
-                if pos_cells.numel() > 0:
-                    local[0] = torch.quantile(
-                        pos_cells, self.risk_safe_quantile)
-                    local[1] = 1.0
+                cm = c_gt > 0.5
+                if cm.any():
+                    idx = torch.nonzero(cm[:, 0], as_tuple=False)
+                    B_, H_, W_ = rf.shape[0], rf.shape[2], rf.shape[3]
+                    vals = []
+                    for b in range(B_):
+                        m_b = idx[idx[:, 0] == b]
+                        if m_b.numel() == 0:
+                            continue
+                        xs = m_b[:, 2].float() / max(W_ - 1, 1) * 2.0 - 1.0
+                        ys = m_b[:, 1].float() / max(H_ - 1, 1) * 2.0 - 1.0
+                        grid_b = torch.stack(
+                            [xs, ys], dim=1).view(1, -1, 1, 2)
+                        s = F.grid_sample(
+                            rf[b:b + 1], grid_b,
+                            mode='bilinear', align_corners=True)
+                        vals.append(s[0, 1, :, 0])     # R_worst channel
+                    if vals:
+                        local[0] = torch.quantile(
+                            torch.cat(vals), self.risk_safe_quantile)
+                        local[1] = 1.0
                 if torch.distributed.is_available() \
                         and torch.distributed.is_initialized():
                     torch.distributed.all_reduce(local)
